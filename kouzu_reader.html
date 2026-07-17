@@ -210,7 +210,7 @@
 
     <div class="row" style="margin-top:4px">
       <label>テキスト（地番）を抽出・表示</label>
-      <input type="checkbox" id="extractText">
+      <input type="checkbox" id="extractText" checked>
     </div>
 
     <div class="row" style="margin-top:4px">
@@ -814,9 +814,23 @@ function toShiftJisBlob(str, mime) {
 // =====================================================================
 // GeoJSON ダウンロード
 // =====================================================================
+// プレビューのレイヤ表示切替(境界線/外枠/地番)を反映したFeatureCollectionを返す
+// 全エクスポート形式(GeoJSON/DXF/JWC)で共通利用
+function getVisibleGeojson() {
+  const visible = geojsonResult.features.filter(f => {
+    const lt = f.properties.layerType;
+    if (lt === 'frame')  return layerVisible.frame;
+    if (lt === 'label')  return layerVisible.label;
+    if (lt === 'border') return layerVisible.border;
+    return true; // layerType未設定(旧フォーマット)は常に含める
+  });
+  return { ...geojsonResult, features: visible };
+}
+
 function downloadGeoJSON() {
   if (!geojsonResult) return;
-  const blob = new Blob([JSON.stringify(geojsonResult, null, 2)], { type: 'application/geo+json' });
+  const out = getVisibleGeojson();
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/geo+json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = nowStamp() + '.geojson';
@@ -874,7 +888,7 @@ function downloadDXF() {
   // 変換実行(processDocument)時に実際に使った縮尺を使う。ダウンロード時点で
   // プルダウンの値が変わっていても出力がズレないようにするため。
   const scaleDenom = geojsonResult._meta.scale_denom;
-  const dxf  = geojsonToDXF(geojsonResult, scaleDenom, lastDpi);
+  const dxf  = geojsonToDXF(getVisibleGeojson(), scaleDenom, lastDpi);
   // R12(AC1009)はUnicodeエスケープ(\U+XXXX)に非対応な古い形式のため、
   // 地番の日本語テキストはファイル自体をShift_JISバイト列で書き出す
   const blob = toShiftJisBlob(dxf, 'application/dxf');
@@ -1026,7 +1040,7 @@ function downloadJWC() {
   if (!geojsonResult) return;
   // 変換実行(processDocument)時に実際に使った縮尺を使う（DXF出力と同じ理由）
   const scaleDenom = geojsonResult._meta.scale_denom;
-  const jwc  = geojsonToJWC(geojsonResult, scaleDenom, lastDpi);
+  const jwc  = geojsonToJWC(getVisibleGeojson(), scaleDenom, lastDpi);
   const blob = toShiftJisBlob(jwc, 'text/plain; charset=Shift_JIS');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -1111,14 +1125,7 @@ function geojsonToJWC(geojson, scaleDenom, dpi) {
       if (verts.length < 2) continue;
 
       const mmVerts = verts.map(pt => toMm(pt));
-      const fMinX = Math.min(...mmVerts.map(p => p[0]));
-      const fMaxX = Math.max(...mmVerts.map(p => p[0]));
-      const fMinY = Math.min(...mmVerts.map(p => p[1]));
-      const fMaxY = Math.max(...mmVerts.map(p => p[1]));
-      const fArea = (fMaxX - fMinX) * (fMaxY - fMinY);
-      const isFrame = totalArea > 0 && fArea / totalArea > 0.85 && verts.length <= 6;
-      const isText  = feat.properties.isBoundary === false;
-      const jwcLayer = isFrame ? 2 : (isText ? 1 : 0);
+      const jwcLayer = detectLayer_JWC(feat, mmVerts, totalArea);
 
       L.push('WL ' + jwcLayer);
       const n = mmVerts.length;
