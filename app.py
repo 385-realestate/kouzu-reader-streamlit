@@ -40,8 +40,13 @@ st.markdown(
     div[data-testid="stDecoration"] {
         display: none;
     }
-    body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
-        background: #1a1a2e;
+    html, body,
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"],
+    [data-testid="stMainBlockContainer"],
+    section.main {
+        background: #1a1a2e !important;
     }
     </style>
     """,
