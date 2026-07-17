@@ -11,11 +11,13 @@ st.markdown(
     .block-container {
         padding-top: 0rem;
         padding-bottom: 0rem;
-        padding-left: 1rem;
-        padding-right: 1rem;
+        padding-left: 0rem;
+        padding-right: 0rem;
+        max-width: 100%;
     }
     iframe {
         margin: 0;
+        display: block;
     }
     header[data-testid="stHeader"] {
         height: 0;
@@ -26,6 +28,9 @@ st.markdown(
     }
     div[data-testid="stDecoration"] {
         display: none;
+    }
+    body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        background: #1a1a2e;
     }
     </style>
     """,
