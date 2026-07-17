@@ -9,13 +9,23 @@ st.markdown(
     """
     <style>
     .block-container {
-        padding-top: 0.5rem;
+        padding-top: 0rem;
         padding-bottom: 0rem;
         padding-left: 1rem;
         padding-right: 1rem;
     }
     iframe {
         margin: 0;
+    }
+    header[data-testid="stHeader"] {
+        height: 0;
+        min-height: 0;
+    }
+    div[data-testid="stToolbar"] {
+        display: none;
+    }
+    div[data-testid="stDecoration"] {
+        display: none;
     }
     </style>
     """,
