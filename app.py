@@ -18,6 +18,17 @@ st.markdown(
     iframe {
         margin: 0;
         display: block;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+    }
+    div[data-testid="stIFrame"],
+    div[data-testid="element-container"],
+    div[data-testid="stCustomComponentV1"] {
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+        background: #1a1a2e;
     }
     header[data-testid="stHeader"] {
         height: 0;
