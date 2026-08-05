@@ -637,6 +637,26 @@ async function processDocument() {
     // ヒューリスティクスで「文字らしき小図形」「方角記号らしき図形」を分類する。
     classifyVectorFeatures(features, scaleDenom);
 
+    // テキスト（地番）抽出
+    // ※ラスター処理でtext層を保持するかどうかの判定に使うため、
+    //   ラスター処理より先に実行する（順序を変えないこと）
+    let textFeatures = [];
+    if (document.getElementById('extractText').checked) {
+      setStatus('テキスト（地番）を抽出中…', 'run'); await tick();
+      textFeatures = await extractPdfText(pageNum, scaleDenom, dpi);
+      // 公図最適化: ヘッダー(上7%)・テーブル(下27%)範囲のテキストを除外
+      if (document.getElementById('kouzuOpt').checked) {
+        const pageHmm  = canvas.height / dpi * 25.4 * scaleDenom;
+        const activeBotMM = pageHmm * 0.27;
+        const activeTopMM = pageHmm * 0.93;
+        textFeatures = textFeatures.filter(f => {
+          const y = f.geometry.coordinates[1];
+          return y >= activeBotMM && y <= activeTopMM;
+        });
+      }
+      console.log('[テキスト抽出] フィルター後件数:', textFeatures.length);
+    }
+
     // 斜線強化モード: ベクターが取れた場合もラスターで補完
     if (forceRaster && features.length > 0) {
       console.log(`[斜線強化] ベクター${features.length}件取得済み → ラスターで斜線を補完`);
@@ -688,26 +708,17 @@ async function processDocument() {
       }));
       coordSystem = 'mm_realworld';
       lastDpi     = procDpi;
-      // ラスターのtext層（文字輪郭の骨格線）を除去 → extractPdfTextの実文字列で代替
-      features = features.filter(f => f.properties.layerType !== 'text');
-    }
-
-    // テキスト（地番）抽出
-    let textFeatures = [];
-    if (document.getElementById('extractText').checked) {
-      setStatus('テキスト（地番）を抽出中…', 'run'); await tick();
-      textFeatures = await extractPdfText(pageNum, scaleDenom, dpi);
-      // 公図最適化: ヘッダー(上7%)・テーブル(下27%)範囲のテキストを除外
-      if (document.getElementById('kouzuOpt').checked) {
-        const pageHmm  = canvas.height / dpi * 25.4 * scaleDenom;
-        const activeBotMM = pageHmm * 0.27;
-        const activeTopMM = pageHmm * 0.93;
-        textFeatures = textFeatures.filter(f => {
-          const y = f.geometry.coordinates[1];
-          return y >= activeBotMM && y <= activeTopMM;
-        });
+      // 以前はラスターのtext層(文字輪郭の骨格線)を無条件に除去していたが、これは
+      // 「PDF内の実テキストで代替される」前提だった。完全にスキャンされたPDF
+      // (ベクター0件)では実テキストも存在しないため代替されず、数字が消えるか
+      // 直線度の高い数字だけが誤って境界線側に残ってしまっていた。
+      // → 実テキストが1件も取得できていない場合のみtext層を保持し、
+      //   境界線とは別の色/レイヤ(kouzu_text)として出力する。
+      if (textFeatures.length === 0) {
+        console.log('[ラスターtext層] 実テキスト0件のため保持:', features.filter(f => f.properties.layerType === 'text').length, '件');
+      } else {
+        features = features.filter(f => f.properties.layerType !== 'text');
       }
-      console.log('[テキスト抽出] フィルター後件数:', textFeatures.length);
     }
 
     setProgress(85);
@@ -742,10 +753,13 @@ async function processDocument() {
     populateChibanTable(textFeatures);
     centerCanvas();
 
-    const nLines = features.length;
-    const nText  = textFeatures.length;
-    document.getElementById('featureCount').textContent =
-      nText > 0 ? `${nLines} ライン / ${nText} 文字` : `${nLines} ライン`;
+    const nLines     = features.filter(f => f.properties.layerType !== 'text').length;
+    const nText      = textFeatures.length;               // PDF実テキスト（文字列あり）
+    const nTextGlyph = features.filter(f => f.properties.layerType === 'text').length; // ラスター文字輪郭（文字列なし）
+    let countLabel = `${nLines} ライン`;
+    if (nText > 0)      countLabel += ` / ${nText} 文字`;
+    if (nTextGlyph > 0) countLabel += ` / 文字輪郭${nTextGlyph}`;
+    document.getElementById('featureCount').textContent = countLabel;
     document.getElementById('coordInfo').textContent =
       gcps.length >= 3 ? '座標系: WGS84 (緯度経度)'
         : coordSystem === 'pixel' ? '座標系: ピクセル→実寸mm (縮尺1/' + scaleDenom + ')'
@@ -1575,15 +1589,33 @@ function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = 
   const minLen = Math.max(4, Math.round(Math.sqrt(minAreaPx) / 5));
   const epsVal = Math.max(0.8, epsRaw * 0.25);  // 曲線の形状を保つため精細化
 
-  // 境界線判定: 3段階の複合条件
+  // 直線的な数字("1"等)は直線度がほぼ1.0になり、丸い数字("0"等)も一周たどると
+  // pixLenが40pxを超えやすいため、直線度・長さだけの判定では境界線に紛れ込む。
+  // これを防ぐため、バウンディングボックスが「文字1文字程度」に収まる小さい
+  // チェーンは、直線度に関わらず先に文字候補として除外する。
+  // 画像の短辺に対する比率で判定するためDPI・解像度に依存しない。
+  const SMALL_BBOX_PX = Math.min(W, H) * 0.02;
+  function bboxDiagPx(c) {
+    let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
+    for (const [x, y] of c.pts) {
+      if (x < bMinX) bMinX = x; if (x > bMaxX) bMaxX = x;
+      if (y < bMinY) bMinY = y; if (y > bMaxY) bMaxY = y;
+    }
+    return Math.hypot(bMaxX - bMinX, bMaxY - bMinY);
+  }
+  const isSmallGlyph = c => bboxDiagPx(c) <= SMALL_BBOX_PX;
+
+  // 境界線判定: 小図形は除外したうえで3段階の複合条件
   //  ① 長いチェーン(≥40px): 曲線境界でも長さで確定
   //  ② 中程度(≥12px) かつ 直線度≥0.45: 直線・斜線の短いフラグメント
   //  ③ 高直線度(≥0.80): 短くても明確な直線セグメント
-  //  それ以外（短く曲率が高い）= 文字筆画として除去
+  //  それ以外（短く曲率が高い、または小図形）= 文字筆画として除去
   const isBorder = c =>
-    c.pixLen >= 40 ||
-    (c.pixLen >= 12 && c.straightness >= 0.45) ||
-    c.straightness >= 0.80;
+    !isSmallGlyph(c) && (
+      c.pixLen >= 40 ||
+      (c.pixLen >= 12 && c.straightness >= 0.45) ||
+      c.straightness >= 0.80
+    );
 
   const frameChainsRaw = traceLines(frameSkel, W, H, minLen, epsVal)
                         .map(c => ({ ...c, layerType: 'frame' }));
