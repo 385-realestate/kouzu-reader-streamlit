@@ -1594,7 +1594,11 @@ function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = 
   // これを防ぐため、バウンディングボックスが「文字1文字程度」に収まる小さい
   // チェーンは、直線度に関わらず先に文字候補として除外する。
   // 画像の短辺に対する比率で判定するためDPI・解像度に依存しない。
-  const SMALL_BBOX_PX = Math.min(W, H) * 0.02;
+  // ※閾値0.02(2%)は区画が密集した公図で境界線の短い断片（分岐点で切られた
+  //   セグメント）まで巻き込み、境界線の大部分が文字色になってしまった。
+  //   まずは閾値を厳しく(0.006=0.6%)して様子を見る。それでも境界線が
+  //   文字色に混ざる場合はこの数値をさらに下げる。
+  const SMALL_BBOX_PX = Math.min(W, H) * 0.006;
   function bboxDiagPx(c) {
     let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
     for (const [x, y] of c.pts) {
