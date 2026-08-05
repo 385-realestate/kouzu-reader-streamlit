@@ -885,6 +885,12 @@ function detectLayer_JWC(feat, mmVerts, totalArea) {
 // =====================================================================
 function downloadDXF() {
   if (!geojsonResult) return;
+  // GCP(地理参照)適用後は座標が緯度経度(度)になっており、DXF/JWCは
+  // 実寸mmでしか出力できない。度をmmとして書き出すと図面が壊れるため止める。
+  if (geojsonResult._meta && geojsonResult._meta.coordinate_system === 'WGS84 (EPSG:4326)') {
+    alert('GCP（地理座標）適用後はDXF出力できません。GCPを設定する前の結果を使用するか、GeoJSON出力をご利用ください。');
+    return;
+  }
   // 変換実行(processDocument)時に実際に使った縮尺を使う。ダウンロード時点で
   // プルダウンの値が変わっていても出力がズレないようにするため。
   const scaleDenom = geojsonResult._meta.scale_denom;
@@ -1038,6 +1044,11 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
 // =====================================================================
 function downloadJWC() {
   if (!geojsonResult) return;
+  // GCP(地理参照)適用後は座標が緯度経度(度)になっており、DXF出力と同じ理由で止める。
+  if (geojsonResult._meta && geojsonResult._meta.coordinate_system === 'WGS84 (EPSG:4326)') {
+    alert('GCP（地理座標）適用後はJWC出力できません。GCPを設定する前の結果を使用するか、GeoJSON出力をご利用ください。');
+    return;
+  }
   // 変換実行(processDocument)時に実際に使った縮尺を使う（DXF出力と同じ理由）
   const scaleDenom = geojsonResult._meta.scale_denom;
   const jwc  = geojsonToJWC(getVisibleGeojson(), scaleDenom, lastDpi);
@@ -1198,11 +1209,16 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
   let ctm = viewport.transform;
   const ctmStack = [];
 
-  function mulCtm(c, m) {
+  // PDFの'cm'演算子: 新しい行列(opMatrix)はまず現在のユーザー空間に適用され、
+  // その結果が既存CTM(oldCtm)でデバイス空間へ変換される。つまり合成順序は
+  // 「opMatrix を先に適用してから oldCtm」= opMatrix * oldCtm であって、
+  // oldCtm * opMatrix ではない（回転・入れ子transformを持つPDFで座標ずれの原因になっていた）。
+  function mulCtm(opMatrix, oldCtm) {
+    const m = opMatrix, c = oldCtm;
     return [
-      c[0]*m[0] + c[1]*m[2],         c[0]*m[1] + c[1]*m[3],
-      c[2]*m[0] + c[3]*m[2],         c[2]*m[1] + c[3]*m[3],
-      c[4]*m[0] + c[5]*m[2] + m[4],  c[4]*m[1] + c[5]*m[3] + m[5]
+      m[0]*c[0] + m[1]*c[2],         m[0]*c[1] + m[1]*c[3],
+      m[2]*c[0] + m[3]*c[2],         m[2]*c[1] + m[3]*c[3],
+      m[4]*c[0] + m[5]*c[2] + c[4],  m[4]*c[1] + m[5]*c[3] + c[5]
     ];
   }
   function applyCtm([x, y]) {
@@ -1216,14 +1232,21 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
 
   const features = [];
   let curPts = [];
+  // 1つのPDFパスは複数のサブパス(moveTo区切り)を含み得て、最後にまとめて
+  // stroke/fillのどちらで描画するかが決まる。以前は moveTo の時点で直前の
+  // サブパスを境界線として確定していたため、複数サブパスを持つ「塗りつぶし
+  // のみ」のパス(fill専用)の一部が誤って境界線化されていた。
+  // → サブパスはpaint演算子が来るまで確定せず貯めておき、stroke系なら全て
+  //   境界線として採用、fill専用なら全て破棄する。
+  let pendingSubpaths = [];
   let lw = 1.0;
   let isDashed = false;
   let pathsBeforeFilter = 0;
 
-  function commitPath(forceClose) {
-    if (curPts.length < 2) { curPts = []; return; }
+  function commitOneSubpath(pts, forceClose) {
+    if (pts.length < 2) return;
     pathsBeforeFilter++;
-    const coords = curPts.map(p => pdfToMm(p));
+    const coords = pts.map(p => pdfToMm(p));
     if (forceClose) {
       const [fx, fy] = coords[0], [lx, ly] = coords[coords.length - 1];
       if (Math.abs(fx - lx) > 0.001 || Math.abs(fy - ly) > 0.001) coords.push([fx, fy]);
@@ -1233,6 +1256,18 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
       geometry: { type: 'LineString', coordinates: coords },
       properties: { lineWidth: lw, isDashed }
     });
+  }
+
+  function flushAsStroke(forceClose) {
+    for (const pts of pendingSubpaths) commitOneSubpath(pts, false);
+    commitOneSubpath(curPts, forceClose);
+    pendingSubpaths = [];
+    curPts = [];
+  }
+
+  function discardPath() {
+    // 純粋な塗り・テキスト下地は境界線として扱わない
+    pendingSubpaths = [];
     curPts = [];
   }
 
@@ -1241,14 +1276,16 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
     const a  = args[i];
 
     if (fn === OPS.save) {
-      ctmStack.push([...ctm]);
+      ctmStack.push({ ctm: [...ctm], lw, isDashed });
     } else if (fn === OPS.restore) {
-      if (ctmStack.length) ctm = ctmStack.pop();
+      if (ctmStack.length) {
+        const s = ctmStack.pop();
+        ctm = s.ctm; lw = s.lw; isDashed = s.isDashed;
+      }
     } else if (fn === OPS.transform) {
-      ctm = mulCtm(ctm, a);
+      ctm = mulCtm(a, ctm);
     } else if (fn === OPS.moveTo) {
-      if (curPts.length >= 2) commitPath(false);
-      else curPts = [];
+      if (curPts.length >= 2) pendingSubpaths.push(curPts);
       curPts = [[a[0], a[1]]];
     } else if (fn === OPS.lineTo) {
       curPts.push([a[0], a[1]]);
@@ -1260,21 +1297,21 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
       curPts.push([a[2], a[3]]);
     } else if (fn === OPS.rectangle) {
       // re オペレーター: x, y, width, height → 矩形パス生成
-      if (curPts.length >= 2) commitPath(false);
+      if (curPts.length >= 2) pendingSubpaths.push(curPts);
       const [rx, ry, rw, rh] = a;
       curPts = [[rx, ry], [rx+rw, ry], [rx+rw, ry+rh], [rx, ry+rh], [rx, ry]];
     } else if (fn === OPS.closePath) {
       if (curPts.length >= 2) curPts.push([...curPts[0]]);
     } else if (fn === OPS.stroke) {
-      commitPath(false);
+      flushAsStroke(false);
     } else if (fn === OPS.closeStroke) {
-      commitPath(true);
+      flushAsStroke(true);
     } else if (fn === OPS.fillStroke || fn === OPS.eoFillStroke) {
-      commitPath(false);   // fillStroke も境界線として取得（多くのPDFがこれを使用）
+      flushAsStroke(false);   // fillStroke も境界線として取得（多くのPDFがこれを使用）
     } else if (fn === OPS.closeFillStroke || fn === OPS.closeEOFillStroke) {
-      commitPath(true);
+      flushAsStroke(true);
     } else if (fn === OPS.fill || fn === OPS.eoFill || fn === OPS.endPath) {
-      curPts = [];   // 純粋な塗り・テキスト下地は破棄
+      discardPath();
     } else if (fn === OPS.setLineWidth) {
       lw = a[0];
     } else if (fn === OPS.setDash) {
@@ -1282,7 +1319,10 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
       isDashed = Array.isArray(a[0]) && a[0].length > 0;
     }
   }
-  if (curPts.length >= 2) commitPath(false);
+  // 末尾に paint 演算子（stroke/fill等）がないまま操作リストが終わった場合、
+  // PDF上その未描画パスは実際には画面に描かれていない＝境界線ではない。
+  // 従来はstroke扱いで確定させてしまい偽の境界線を生む可能性があったため、破棄する。
+  discardPath();
 
   const debugInfo = `ops:${fns.length} moveTo:${opFreq[OPS.moveTo]||0} stroke:${opFreq[OPS.stroke]||0} fillStroke:${opFreq[OPS.fillStroke]||0} fill:${opFreq[OPS.fill]||0} rect:${opFreq[OPS.rectangle]||0} paths:${pathsBeforeFilter}`;
   console.log('[PDF解析]', debugInfo, '→ features:', features.length);
