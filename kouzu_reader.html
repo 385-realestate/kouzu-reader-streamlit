@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>公図PDF → GeoJSON 変換</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
   <script>
 /*!
  * encoding-japanese v2.2.0 - Convert and detect character encoding in JavaScript
@@ -708,16 +709,77 @@ async function processDocument() {
       }));
       coordSystem = 'mm_realworld';
       lastDpi     = procDpi;
-      // 以前はラスターのtext層(文字輪郭の骨格線)を無条件に除去していたが、これは
-      // 「PDF内の実テキストで代替される」前提だった。完全にスキャンされたPDF
-      // (ベクター0件)では実テキストも存在しないため代替されず、数字が消えるか
-      // 直線度の高い数字だけが誤って境界線側に残ってしまっていた。
-      // → 実テキストが1件も取得できていない場合のみtext層を保持し、
-      //   境界線とは別の色/レイヤ(kouzu_text)として出力する。
-      if (textFeatures.length === 0) {
-        console.log('[ラスターtext層] 実テキスト0件のため保持:', features.filter(f => f.properties.layerType === 'text').length, '件');
-      } else {
-        features = features.filter(f => f.properties.layerType !== 'text');
+
+      // PDF内に実テキストが1件も無い（完全スキャンPDF）場合、OCR(Tesseract.js)で
+      // 地番数字らしき領域を検出し、その範囲にある境界線候補チェーンだけを
+      // 文字レイヤへ振り分ける。OCRで検出できなかった部分は境界線色のまま残る
+      // （直線度等の幾何学的な推測には頼らない）。
+      // ※OCR文字列そのものをDXF/JWCのTEXTとして追加することも検討したが、
+      //   OCRのbbox中心とTEXTエンティティの基準点(左下寄り)が一致せず、
+      //   元の文字輪郭と二重表示・位置ズレを起こすリスクがあるため見送った。
+      //   今回はあくまで「境界線/文字の色分け（マスク）」用途に限定する。
+      if (textFeatures.length === 0 && document.getElementById('extractText').checked) {
+        setStatus('OCRで地番文字を認識中…（時間がかかります）', 'run');
+        await tick(); setProgress(85);
+        try {
+          const ocrWordsRaw = await ocrDetectDigitRegions(procCanvas);
+          console.log('[OCR] 検出語数(生):', ocrWordsRaw.length, ocrWordsRaw);
+
+          // マスク用フィルタ: 数字を1文字以上含み、信頼度が低すぎない・
+          // 極端に細長い(誤認識の帯状ノイズ等)ものは除外する
+          const MASK_MIN_CONF = 25;
+          const ocrWords = ocrWordsRaw.filter(w => {
+            if (w.confidence < MASK_MIN_CONF) return false;
+            if (!/[0-9]/.test(w.text)) return false;
+            const bw = w.bbox.x1 - w.bbox.x0, bh = w.bbox.y1 - w.bbox.y0;
+            if (bw <= 0 || bh <= 0) return false;
+            const aspect = Math.max(bw, bh) / Math.min(bw, bh);
+            return aspect <= 15; // 細長すぎる帯はノイズとみなす
+          });
+          console.log('[OCR] マスク採用語数:', ocrWords.length, ocrWords);
+
+          // 文字領域に少し余白(マージン)を持たせてから判定に使う
+          const MARGIN_PX = Math.max(3, Math.round(Math.min(procCanvas.width, procCanvas.height) * 0.003));
+          const ocrBoxesMm = ocrWords.map(w => ({
+            minX: (w.bbox.x0 - MARGIN_PX) * mmPerPxProc,
+            maxX: (w.bbox.x1 + MARGIN_PX) * mmPerPxProc,
+            // ピクセルYは上原点、実寸mmは下原点(Y上向き)なので反転させる
+            minY: (pH - (w.bbox.y1 + MARGIN_PX)) * mmPerPxProc,
+            maxY: (pH - (w.bbox.y0 - MARGIN_PX)) * mmPerPxProc,
+          }));
+
+          // チェーン全体の重心ではなく、線分ごとにOCR領域内かどうかを判定し、
+          // その線分長の合計がチェーン全長に占める割合で判定する。
+          // (重心だけで判定すると、OCR領域を横切るだけの長い境界線が
+          //  丸ごと文字扱いになってしまう問題があったため)
+          function insideAnyOcrBox(x, y) {
+            return ocrBoxesMm.some(b => x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY);
+          }
+          function insideRatio(f) {
+            const pts = f.geometry.coordinates;
+            let total = 0, inside = 0;
+            for (let i = 1; i < pts.length; i++) {
+              const [x1, y1] = pts[i - 1], [x2, y2] = pts[i];
+              const segLen = Math.hypot(x2 - x1, y2 - y1);
+              total += segLen;
+              if (insideAnyOcrBox((x1 + x2) / 2, (y1 + y2) / 2)) inside += segLen;
+            }
+            return total > 0 ? inside / total : 0;
+          }
+
+          const INSIDE_RATIO_THRESHOLD = 0.5;
+          let reclassified = 0;
+          for (const f of features) {
+            if (f.properties.layerType !== 'border') continue;
+            if (insideRatio(f) >= INSIDE_RATIO_THRESHOLD) {
+              f.properties.layerType = 'text';
+              reclassified++;
+            }
+          }
+          console.log('[OCR] 境界線→文字へ再分類:', reclassified, '件');
+        } catch (e) {
+          console.warn('[OCR] 失敗（境界線のみで続行）:', e);
+        }
       }
     }
 
@@ -1475,6 +1537,43 @@ async function extractPdfText(pageNum, scaleDenom, dpi) {
 }
 
 // =====================================================================
+// OCR（Tesseract.js）による地番数字検出
+// 完全スキャンPDF（PDF内に実テキストが存在しない）向け。
+// 文字列の完全一致は要求せず、「文字がありそうな領域」を検出することを
+// 主目的とする（境界線抽出との切り分けに使う）。認識できた文字列は
+// 副次的に地番ラベルとしても採用する。
+// =====================================================================
+async function ocrDetectDigitRegions(canvas) {
+  if (typeof Tesseract === 'undefined') {
+    console.warn('[OCR] Tesseract.jsが読み込まれていません');
+    return [];
+  }
+  const worker = await Tesseract.createWorker('eng', 1, {
+    logger: m => {
+      if (m.status && typeof m.progress === 'number') {
+        setStatus(`OCRで地番文字を認識中…（${m.status} ${Math.round(m.progress * 100)}%）`, 'run');
+      }
+    },
+  });
+  try {
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789-',
+      // 文書全体に短いラベルが疎らに散らばる図面向けのページ分割モード
+      tessedit_pageseg_mode: (Tesseract.PSM && Tesseract.PSM.SPARSE_TEXT) || '11',
+    });
+    const { data } = await worker.recognize(canvas);
+    const words = (data.words || []).filter(w => w.text && w.text.trim().length > 0);
+    return words.map(w => ({
+      text: w.text.trim(),
+      confidence: w.confidence,
+      bbox: w.bbox, // {x0,y0,x1,y1} 単位: canvasのピクセル座標
+    }));
+  } finally {
+    await worker.terminate();
+  }
+}
+
+// =====================================================================
 // テキストラベル プレビュー描画
 // =====================================================================
 function drawTextLabels(ctx, textFeatures, imgW, imgH, scaleDenom, dpi) {
@@ -1583,52 +1682,23 @@ function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = 
   const frameSkel   = framePixelCount > 0 ? zhangSuenThin(frameMask,  W, H) : frameMask;
   const contentSkel = zhangSuenThin(contentBin, W, H);
 
-  // ── 7. トレース後に直線度で境界線/地番テキストを分類
-  //    直線度(straightness) = コード長/パス長: 直線≒1.0, 文字筆画≒0.1〜0.5
-  //    斜め線も直線なので直線度が高い → 境界線に正しく分類される
+  // ── 7. トレース
+  //    以前はここで直線度(コード長/パス長)・長さ・バウンディングボックスサイズ
+  //    から「境界線」「地番文字」を推測で振り分けていたが、直線的な数字("1"等)や
+  //    丸い数字("0"等)は境界線と幾何学的に区別が付かず、逆に区画が密集した図面
+  //    では境界線の断片まで文字色に誤判定されるなど、精度に限界があった。
+  //    → ここでは全て「境界線候補」として扱い、実際の文字/境界線の分離は
+  //      呼び出し側でOCR(Tesseract.js)が検出した領域を使って行う
+  //      （OCRで検出できた範囲だけ文字色に上書き。検出できなかった部分は
+  //      境界線色のまま＝ユーザー要望の「読み取れていないものは境界線」）。
   const minLen = Math.max(4, Math.round(Math.sqrt(minAreaPx) / 5));
   const epsVal = Math.max(0.8, epsRaw * 0.25);  // 曲線の形状を保つため精細化
-
-  // 直線的な数字("1"等)は直線度がほぼ1.0になり、丸い数字("0"等)も一周たどると
-  // pixLenが40pxを超えやすいため、直線度・長さだけの判定では境界線に紛れ込む。
-  // これを防ぐため、バウンディングボックスが「文字1文字程度」に収まる小さい
-  // チェーンは、直線度に関わらず先に文字候補として除外する。
-  // 画像の短辺に対する比率で判定するためDPI・解像度に依存しない。
-  // ※閾値0.02(2%)は区画が密集した公図で境界線の短い断片（分岐点で切られた
-  //   セグメント）まで巻き込み、境界線の大部分が文字色になってしまった。
-  //   まずは閾値を厳しく(0.006=0.6%)して様子を見る。それでも境界線が
-  //   文字色に混ざる場合はこの数値をさらに下げる。
-  const SMALL_BBOX_PX = Math.min(W, H) * 0.006;
-  function bboxDiagPx(c) {
-    let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
-    for (const [x, y] of c.pts) {
-      if (x < bMinX) bMinX = x; if (x > bMaxX) bMaxX = x;
-      if (y < bMinY) bMinY = y; if (y > bMaxY) bMaxY = y;
-    }
-    return Math.hypot(bMaxX - bMinX, bMaxY - bMinY);
-  }
-  const isSmallGlyph = c => bboxDiagPx(c) <= SMALL_BBOX_PX;
-
-  // 境界線判定: 小図形は除外したうえで3段階の複合条件
-  //  ① 長いチェーン(≥40px): 曲線境界でも長さで確定
-  //  ② 中程度(≥12px) かつ 直線度≥0.45: 直線・斜線の短いフラグメント
-  //  ③ 高直線度(≥0.80): 短くても明確な直線セグメント
-  //  それ以外（短く曲率が高い、または小図形）= 文字筆画として除去
-  const isBorder = c =>
-    !isSmallGlyph(c) && (
-      c.pixLen >= 40 ||
-      (c.pixLen >= 12 && c.straightness >= 0.45) ||
-      c.straightness >= 0.80
-    );
 
   const frameChainsRaw = traceLines(frameSkel, W, H, minLen, epsVal)
                         .map(c => ({ ...c, layerType: 'frame' }));
 
-  const allContent  = traceLines(contentSkel, W, H, minLen, epsVal);
-  const lineChainsRaw = allContent.filter(isBorder)
-    .map(c => ({ ...c, layerType: 'border' }));
-  const textChains  = allContent.filter(c => !isBorder(c))
-    .map(c => ({ ...c, layerType: 'text' }));
+  const allContent    = traceLines(contentSkel, W, H, minLen, epsVal);
+  const lineChainsRaw = allContent.map(c => ({ ...c, layerType: 'border' }));
 
   // ── 断片マージ: 細線化で生じた偽の分岐点により斜め線が多数の
   //    短いチェーンに分断される問題を、ほぼ同一直線上で近接する
@@ -1640,8 +1710,8 @@ function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = 
   console.log('[3レイヤ分離] 外枠px:', framePixelCount,
     '/ 外枠チェーン:', frameChainsRaw.length, '→マージ後', frameChains.length,
     '/ 境界線チェーン:', lineChainsRaw.length, '→マージ後', lineChains.length,
-    '/ 地番チェーン(除外):', textChains.length);
-  return [...frameChains, ...lineChains, ...textChains];
+    '(文字判定はOCRで別途実施)');
+  return [...frameChains, ...lineChains];
 }
 
 // =====================================================================
