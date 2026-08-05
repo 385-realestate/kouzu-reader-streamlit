@@ -302,9 +302,10 @@
       <span class="info"  id="coordInfo">座標系: –</span>
       <div class="layer-toggles">
         <span>表示:</span>
-        <button class="lbtn on" id="lbtn-border" onclick="toggleLayer('border')">境界線</button>
-        <button class="lbtn on" id="lbtn-frame"  onclick="toggleLayer('frame')">外枠</button>
-        <button class="lbtn on" id="lbtn-label"  onclick="toggleLayer('label')">地番</button>
+        <button class="lbtn on" id="lbtn-border"    onclick="toggleLayer('border')">境界線</button>
+        <button class="lbtn on" id="lbtn-frame"     onclick="toggleLayer('frame')">外枠</button>
+        <button class="lbtn on" id="lbtn-label"     onclick="toggleLayer('label')">地番</button>
+        <button class="lbtn on" id="lbtn-direction" onclick="toggleLayer('direction')">方角</button>
       </div>
       <div class="dl-group">
         <button class="btn-dl"  id="downloadBtn" disabled onclick="downloadGeoJSON()">GeoJSON</button>
@@ -342,7 +343,7 @@ let viewScale = 1, viewX = 0, viewY = 0;
 let _isDrag = false, _ds = {x:0,y:0}, _dv = {x:0,y:0};
 
 // レイヤ表示状態
-const layerVisible = { frame: true, border: true, label: true };
+const layerVisible = { frame: true, border: true, label: true, direction: true };
 let storedPdfCanvas = null, storedLineFeats = [], storedTextFeats = [];
 let storedCanvasW = 0, storedCanvasH = 0, storedScaleDen = 500, storedRendDpi = 200;
 
@@ -424,7 +425,10 @@ function redrawPreview() {
   ctx.drawImage(storedPdfCanvas, 0, 0);
   const vis = storedLineFeats.filter(f => {
     const lt = f.properties.layerType;
-    return lt === 'frame' ? layerVisible.frame : layerVisible.border;
+    if (lt === 'frame')     return layerVisible.frame;
+    if (lt === 'text')      return layerVisible.label;
+    if (lt === 'direction') return layerVisible.direction;
+    return layerVisible.border;
   });
   if (vis.length)
     drawContours(ctx, vis, storedCanvasW, storedCanvasH, storedScaleDen, storedRendDpi);
@@ -628,6 +632,10 @@ async function processDocument() {
     console.log('[PDF診断]', debugInfo);
     features = res.features;
     if (skipDash) features = features.filter(f => !f.properties.isDashed);
+    // ベクターPDFで地番数字がPDF実テキストではなくアウトライン化された図形の
+    // 場合、extractPdfTextでは拾えず境界線と見分けが付かない。サイズ・位置の
+    // ヒューリスティクスで「文字らしき小図形」「方角記号らしき図形」を分類する。
+    classifyVectorFeatures(features, scaleDenom);
 
     // 斜線強化モード: ベクターが取れた場合もラスターで補完
     if (forceRaster && features.length > 0) {
@@ -762,13 +770,73 @@ async function processDocument() {
 // =====================================================================
 // 輪郭プレビュー描画（LineString 対応）
 // =====================================================================
+// =====================================================================
+// ベクターPDFの小図形分類（地番文字らしき図形／方角記号らしき図形）
+// PDF内に実テキストが存在せず、数字がアウトライン化された図形として
+// 埋め込まれているケース向けのヒューリスティクス。境界線は一般に数m以上の
+// 長さを持つのに対し、印字文字1画は実寸換算でも小さいことを利用する。
+// 100%正確ではないため誤分類し得るが、レイヤ表示切替（UI）で
+// 手動確認・切替できるようにしてあるので実害は小さい。
+// =====================================================================
+function classifyVectorFeatures(features, scaleDenom) {
+  if (!features.length) return;
+
+  function bbox(feat) {
+    const pts = feat.geometry.type === 'LineString'
+      ? feat.geometry.coordinates : feat.geometry.coordinates[0];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [x, y] of pts) {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    return { minX, minY, maxX, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
+             diag: Math.hypot(maxX - minX, maxY - minY) };
+  }
+
+  let pgMinX = Infinity, pgMinY = Infinity, pgMaxX = -Infinity, pgMaxY = -Infinity;
+  const boxes = features.map(f => {
+    const b = bbox(f);
+    if (b.minX < pgMinX) pgMinX = b.minX; if (b.maxX > pgMaxX) pgMaxX = b.maxX;
+    if (b.minY < pgMinY) pgMinY = b.minY; if (b.maxY > pgMaxY) pgMaxY = b.maxY;
+    return b;
+  });
+  const pageW = pgMaxX - pgMinX, pageH = pgMaxY - pgMinY;
+  if (pageW <= 0 || pageH <= 0) return;
+
+  // 座標はすでに「紙面mm × scaleDenom」の実世界mmになっている。
+  // 印字文字は紙面上で数mm程度という想定のもと、実世界mmでの閾値も
+  // scaleDenomに比例させる（例: 1/500で紙面3mmの文字 → 実世界1500mm）。
+  const TEXT_DIAG_MAX_MM      = 3.0  * scaleDenom;  // 文字ストローク1本相当（紙面3mm換算）
+  const DIRECTION_DIAG_MAX_MM = 15.0 * scaleDenom;  // 方角記号(コンパス)はやや大きめ（紙面15mm換算）
+  const CORNER_RATIO = 0.18; // ページ四隅からこの比率以内を「隅」とみなす
+
+  features.forEach((feat, i) => {
+    if (feat.properties.layerType) return; // 既に分類済みのものはそのまま
+    const b = boxes[i];
+    const inCornerX = (b.cx - pgMinX) < pageW * CORNER_RATIO || (pgMaxX - b.cx) < pageW * CORNER_RATIO;
+    const inCornerY = (b.cy - pgMinY) < pageH * CORNER_RATIO || (pgMaxY - b.cy) < pageH * CORNER_RATIO;
+
+    if (inCornerX && inCornerY && b.diag > TEXT_DIAG_MAX_MM && b.diag <= DIRECTION_DIAG_MAX_MM) {
+      feat.properties.layerType = 'direction';
+    } else if (b.diag <= TEXT_DIAG_MAX_MM) {
+      feat.properties.layerType = 'text';
+    }
+    // それ以外(大きい図形)は未指定のまま → detectLayer_DXF/JWCの
+    // フォールバック判定（外枠/境界線）に委ねる
+  });
+}
+
 function drawContours(ctx, features, imgW, imgH, scaleDenom, dpi) {
   const mmToPixFactor = dpi / (25.4 * scaleDenom);  // 実寸mm → canvas pixel
   function mmToPx([mx, my]) {
     return [mx * mmToPixFactor, imgH - my * mmToPixFactor];
   }
+  // レイヤ種別ごとのプレビュー色。DXF/JWC出力の色分け（境界線=黄, 文字=緑,
+  // 方角=青）と対応関係が分かるよう、境界線/外枠は既存のアクセント色のまま、
+  // 文字・方角は別色にする。
+  const COLOR_BY_LAYER = { text: '#7CFC00', direction: '#3FA9F5' };
+  const DEFAULT_COLOR  = '#e94560';
   ctx.save();
-  ctx.strokeStyle = '#e94560';
   ctx.lineWidth   = 1.2;
   ctx.globalAlpha = 0.85;
   features.forEach(feat => {
@@ -776,6 +844,7 @@ function drawContours(ctx, features, imgW, imgH, scaleDenom, dpi) {
       ? feat.geometry.coordinates
       : feat.geometry.coordinates[0];
     if (!pts || pts.length < 2) return;
+    ctx.strokeStyle = COLOR_BY_LAYER[feat.properties.layerType] || DEFAULT_COLOR;
     const [sx, sy] = mmToPx(pts[0]);
     ctx.beginPath();
     ctx.moveTo(sx, sy);
@@ -819,10 +888,15 @@ function toShiftJisBlob(str, mime) {
 function getVisibleGeojson() {
   const visible = geojsonResult.features.filter(f => {
     const lt = f.properties.layerType;
-    if (lt === 'frame')  return layerVisible.frame;
-    if (lt === 'label')  return layerVisible.label;
-    if (lt === 'border') return layerVisible.border;
-    return true; // layerType未設定(旧フォーマット)は常に含める
+    if (lt === 'frame')     return layerVisible.frame;
+    if (lt === 'label')     return layerVisible.label;
+    if (lt === 'text')      return layerVisible.label;
+    if (lt === 'direction') return layerVisible.direction;
+    // layerType未設定の図形はプレビュー(redrawPreview)と同じ扱いにする。
+    // 未分類ベクター図形の大半はここに来る（=境界線の一部として扱う）。
+    // 以前はここが常にtrueだったため、境界線レイヤをOFFにしてもエクスポートに
+    // 残ってしまう不整合があった。
+    return layerVisible.border;
   });
   return { ...geojsonResult, features: visible };
 }
@@ -848,9 +922,10 @@ function getRings(feat) {
 
 function detectLayer_DXF(feat, mmVerts, totalArea) {
   const lt = feat.properties.layerType;
-  if (lt === 'frame')  return 'kouzu_frame';
-  if (lt === 'text')   return 'kouzu_text';
-  if (lt === 'border') return 'kouzu_border';
+  if (lt === 'frame')     return 'kouzu_frame';
+  if (lt === 'text')      return 'kouzu_text';
+  if (lt === 'direction') return 'kouzu_direction';
+  if (lt === 'border')    return 'kouzu_border';
   // ベクターモード or 旧フォーマットへのフォールバック
   let fMinX = Infinity, fMaxX = -Infinity, fMinY = Infinity, fMaxY = -Infinity;
   for (const [mx, my] of mmVerts) {
@@ -865,9 +940,10 @@ function detectLayer_DXF(feat, mmVerts, totalArea) {
 
 function detectLayer_JWC(feat, mmVerts, totalArea) {
   const lt = feat.properties.layerType;
-  if (lt === 'frame')  return 2;
-  if (lt === 'text')   return 1;
-  if (lt === 'border') return 0;
+  if (lt === 'frame')     return 2;
+  if (lt === 'text')      return 1;
+  if (lt === 'direction') return 3;
+  if (lt === 'border')    return 0;
   // ベクターモード or 旧フォーマットへのフォールバック
   let fMinX = Infinity, fMaxX = -Infinity, fMinY = Infinity, fMaxY = -Infinity;
   for (const [mx, my] of mmVerts) {
@@ -978,11 +1054,12 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
   w('  0','TABLE','  2','LTYPE',' 70','1');
   w('  0','LTYPE','  2','CONTINUOUS',' 70','0','  3','Solid line',' 72','65',' 73','0',' 40','0.0');
   w('  0','ENDTAB');
-  w('  0','TABLE','  2','LAYER',' 70','4');
-  w('  0','LAYER','  2','kouzu_border',' 70','0',' 62','2','  6','CONTINUOUS');
-  w('  0','LAYER','  2','kouzu_text',  ' 70','0',' 62','3','  6','CONTINUOUS');
-  w('  0','LAYER','  2','kouzu_frame', ' 70','0',' 62','7','  6','CONTINUOUS');
-  w('  0','LAYER','  2','kouzu_label', ' 70','0',' 62',String(LABEL_ACI_COLOR),'  6','CONTINUOUS');
+  w('  0','TABLE','  2','LAYER',' 70','5');
+  w('  0','LAYER','  2','kouzu_border',   ' 70','0',' 62','2','  6','CONTINUOUS');
+  w('  0','LAYER','  2','kouzu_text',     ' 70','0',' 62','3','  6','CONTINUOUS');
+  w('  0','LAYER','  2','kouzu_frame',    ' 70','0',' 62','7','  6','CONTINUOUS');
+  w('  0','LAYER','  2','kouzu_label',    ' 70','0',' 62',String(LABEL_ACI_COLOR),'  6','CONTINUOUS');
+  w('  0','LAYER','  2','kouzu_direction',' 70','0',' 62','5','  6','CONTINUOUS');  // 方角=青
   w('  0','ENDTAB');
   w('  0','ENDSEC');
 
@@ -1132,6 +1209,7 @@ function geojsonToJWC(geojson, scaleDenom, dpi) {
   L.push('L 0 2 0');  // レイヤ0 黄（境界線）
   L.push('L 1 3 0');  // レイヤ1 緑（地番・文字）
   L.push('L 2 7 0');  // レイヤ2 白（外枠）
+  L.push('L 3 5 0');  // レイヤ3 青（方角記号）
   L.push('HED');
 
   // 図形データ（線分に展開）
