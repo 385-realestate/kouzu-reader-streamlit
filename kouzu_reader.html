@@ -905,6 +905,11 @@ function downloadDXF() {
 }
 
 function geojsonToDXF(geojson, scaleDenom, dpi) {
+  // 地番文字の色（AutoCAD Color Index）。境界線(2=黄)と紛れないよう指定。
+  // ACI 62(黄緑系)はCAD側の色近似で黄色に丸められる場合があるため、
+  // 基本8色で互換性が高く黄色との区別が確実な ACI 3(緑) を使う。
+  // 好みの色に変えたい場合はこの数値だけ変更すれば全体に反映される。
+  const LABEL_ACI_COLOR = 3; // 緑
   const isPixel = !geojson._meta || geojson._meta.coordinate_system.startsWith('pixel');
   const [imgW, imgH] = geojson._meta ? geojson._meta.img_size : [0, 0];
   // 実寸mm(縮尺倍済み)mm/px。JW_CAD側の「縮尺・読取設定」に一切依存させず、
@@ -977,7 +982,7 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
   w('  0','LAYER','  2','kouzu_border',' 70','0',' 62','2','  6','CONTINUOUS');
   w('  0','LAYER','  2','kouzu_text',  ' 70','0',' 62','3','  6','CONTINUOUS');
   w('  0','LAYER','  2','kouzu_frame', ' 70','0',' 62','7','  6','CONTINUOUS');
-  w('  0','LAYER','  2','kouzu_label', ' 70','0',' 62','4','  6','CONTINUOUS');
+  w('  0','LAYER','  2','kouzu_label', ' 70','0',' 62',String(LABEL_ACI_COLOR),'  6','CONTINUOUS');
   w('  0','ENDTAB');
   w('  0','ENDSEC');
 
@@ -1026,6 +1031,7 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
     w('  0','TEXT');
     w('  8','kouzu_label');
     w('  6','CONTINUOUS');
+    w(' 62', String(LABEL_ACI_COLOR));  // レイヤ既定色に頼らずエンティティ自体に色を明示
     w(' 10', mx.toFixed(3));
     w(' 20', my.toFixed(3));
     w(' 30','0.000');
