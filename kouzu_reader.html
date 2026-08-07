@@ -715,13 +715,13 @@ async function processDocument() {
       lastDpi     = procDpi;
 
       // PDF内に実テキストが1件も無い（完全スキャンPDF）場合、OCR(Tesseract.js)で
-      // 地番数字らしき領域を検出し、その範囲にある境界線候補チェーンだけを
-      // 文字レイヤへ振り分ける。OCRで検出できなかった部分は境界線色のまま残る
+      // 地番数字らしき領域を検出し、その範囲にある境界線候補チェーンを文字レイヤへ
+      // 振り分ける。OCRで検出できなかった部分は境界線色のまま残る
       // （直線度等の幾何学的な推測には頼らない）。
-      // ※OCR文字列そのものをDXF/JWCのTEXTとして追加することも検討したが、
-      //   OCRのbbox中心とTEXTエンティティの基準点(左下寄り)が一致せず、
-      //   元の文字輪郭と二重表示・位置ズレを起こすリスクがあるため見送った。
-      //   今回はあくまで「境界線/文字の色分け（マスク）」用途に限定する。
+      // さらに、信頼度が高く地番らしい形式に一致した語は、実際の文字列として
+      // textFeatures（Point + TEXT）に採用し、対応する輪郭チェーンは削除する
+      // （輪郭と実テキストの二重表示を避けるため。低信頼度の語は従来通り
+      //  色分けのみに留め、実テキストとしては採用しない）。
       if (textFeatures.length === 0 && document.getElementById('extractText').checked) {
         setStatus('OCRで地番文字を認識中…（時間がかかります）', 'run');
         await tick(); setProgress(85);
@@ -742,7 +742,9 @@ async function processDocument() {
           });
           console.log('[OCR] マスク採用語数:', ocrWords.length, ocrWords);
 
-          // 文字領域に少し余白(マージン)を持たせてから判定に使う
+          // マスク判定用に少し余白(マージン)を持たせたbboxと、TEXT配置用の
+          // 生bbox(マージン無し)を分けて保持する。マージン込みbboxをTEXT位置
+          // 計算にも使うと、挿入位置が左下へ・文字高が実際より大きくずれるため。
           const MARGIN_PX = Math.max(3, Math.round(Math.min(procCanvas.width, procCanvas.height) * 0.003));
           const ocrBoxesMm = ocrWords.map(w => ({
             minX: (w.bbox.x0 - MARGIN_PX) * mmPerPxProc,
@@ -750,37 +752,117 @@ async function processDocument() {
             // ピクセルYは上原点、実寸mmは下原点(Y上向き)なので反転させる
             minY: (pH - (w.bbox.y1 + MARGIN_PX)) * mmPerPxProc,
             maxY: (pH - (w.bbox.y0 - MARGIN_PX)) * mmPerPxProc,
+            rawMinX: w.bbox.x0 * mmPerPxProc,
+            rawMaxX: w.bbox.x1 * mmPerPxProc,
+            rawMinY: (pH - w.bbox.y1) * mmPerPxProc,
+            rawMaxY: (pH - w.bbox.y0) * mmPerPxProc,
+            text: w.text, confidence: w.confidence,
           }));
 
-          // チェーン全体の重心ではなく、線分ごとにOCR領域内かどうかを判定し、
-          // その線分長の合計がチェーン全長に占める割合で判定する。
-          // (重心だけで判定すると、OCR領域を横切るだけの長い境界線が
-          //  丸ごと文字扱いになってしまう問題があったため)
-          function insideAnyOcrBox(x, y) {
-            return ocrBoxesMm.some(b => x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY);
+          // 線分とOCR領域(矩形)の交差部分の長さを正確に求める(Liang-Barsky型の
+          // 線分クリッピング)。以前は「線分の中点が領域内かどうか」で線分全長を
+          // 内包扱いしており、長い線分が領域を少し横切っただけで過大評価される
+          // 問題があった。
+          function segClipLenInBox(x1, y1, x2, y2, b) {
+            let t0 = 0, t1 = 1;
+            const dx = x2 - x1, dy = y2 - y1;
+            const edges = [
+              [-dx, x1 - b.minX], [dx, b.maxX - x1],
+              [-dy, y1 - b.minY], [dy, b.maxY - y1],
+            ];
+            for (const [p, q] of edges) {
+              if (p === 0) {
+                if (q < 0) return 0;
+              } else {
+                const r = q / p;
+                if (p < 0) { if (r > t1) return 0; if (r > t0) t0 = r; }
+                else       { if (r < t0) return 0; if (r < t1) t1 = r; }
+              }
+            }
+            if (t0 > t1) return 0;
+            return (t1 - t0) * Math.hypot(dx, dy);
           }
-          function insideRatio(f) {
+
+          // チェーンの各線分ごとに、最も重なりが大きいOCR領域へ按分して
+          // 内包長を集計する。合計に対する割合(ratio)と、領域ごとの内包長を返す。
+          function matchedBoxes(f) {
             const pts = f.geometry.coordinates;
-            let total = 0, inside = 0;
+            let total = 0, insideTotal = 0;
+            const lenByBox = new Map();
             for (let i = 1; i < pts.length; i++) {
               const [x1, y1] = pts[i - 1], [x2, y2] = pts[i];
               const segLen = Math.hypot(x2 - x1, y2 - y1);
               total += segLen;
-              if (insideAnyOcrBox((x1 + x2) / 2, (y1 + y2) / 2)) inside += segLen;
+              let bestLen = 0, bestBox = null;
+              for (const b of ocrBoxesMm) {
+                const clipLen = segClipLenInBox(x1, y1, x2, y2, b);
+                if (clipLen > bestLen) { bestLen = clipLen; bestBox = b; }
+              }
+              if (bestBox && bestLen > 0) {
+                lenByBox.set(bestBox, (lenByBox.get(bestBox) || 0) + bestLen);
+                insideTotal += bestLen;
+              }
             }
-            return total > 0 ? inside / total : 0;
+            return { ratio: total > 0 ? insideTotal / total : 0, lenByBox, total };
+          }
+          function dominantBox(lenByBox, total) {
+            let domBox = null, domLen = -1;
+            for (const [b, len] of lenByBox) if (len > domLen) { domBox = b; domLen = len; }
+            return { domBox, domRatio: total > 0 ? domLen / total : 0 };
           }
 
           const INSIDE_RATIO_THRESHOLD = 0.5;
+          // 実テキストとして自動採用する条件は、地番＝識別情報であることを踏まえ
+          // 厳しめに設定する（マスク用の信頼度より大幅に高い信頼度を要求する）。
+          // それでも誤読が完全にゼロになる保証はないため、DXF/JWC出力後は
+          // 必ず元のスキャン画像と目視で照合すること。
+          const LABEL_MIN_CONF = 85;
+          const DOM_RATIO_THRESHOLD = 0.6; // 支配的な領域単独でチェーンの60%以上を説明できること
+          const CHIBAN_RE = /^[0-9]{1,5}(-[0-9]{1,3})?$/;
+          const adoptedBoxes = new Set();
           let reclassified = 0;
           for (const f of features) {
             if (f.properties.layerType !== 'border') continue;
-            if (insideRatio(f) >= INSIDE_RATIO_THRESHOLD) {
-              f.properties.layerType = 'text';
-              reclassified++;
+            const { ratio, lenByBox, total } = matchedBoxes(f);
+            if (ratio < INSIDE_RATIO_THRESHOLD) continue;
+            f.properties.layerType = 'text';
+            reclassified++;
+            const { domBox, domRatio } = dominantBox(lenByBox, total);
+            if (domBox && domRatio >= DOM_RATIO_THRESHOLD &&
+                domBox.confidence >= LABEL_MIN_CONF && CHIBAN_RE.test(domBox.text)) {
+              adoptedBoxes.add(domBox);
             }
           }
-          console.log('[OCR] 境界線→文字へ再分類:', reclassified, '件');
+          console.log('[OCR] 境界線→文字へ再分類:', reclassified, '件 / 実テキスト採用候補:', adoptedBoxes.size, '件');
+
+          if (adoptedBoxes.size > 0) {
+            // 採用が決まった領域について、その領域が「支配的」であるチェーンだけを
+            // 取り除き、代わりに実テキスト(Point)を追加する（判定基準を採用時と
+            // 揃えることで、無関係なチェーンまで消してしまうのを防ぐ）
+            features = features.filter(f => {
+              if (f.properties.layerType !== 'text') return true;
+              const { lenByBox, total } = matchedBoxes(f);
+              const { domBox, domRatio } = dominantBox(lenByBox, total);
+              return !(domBox && adoptedBoxes.has(domBox) && domRatio >= DOM_RATIO_THRESHOLD);
+            });
+            for (const b of adoptedBoxes) {
+              textFeatures.push({
+                type: 'Feature',
+                // 挿入点は左下基準（DXF/JWCのTEXTは水平・垂直位置指定なしのため
+                // 既定で左下基準になる。実テキストと同じ扱いに揃える）。
+                // マージン込みbboxではなく生bboxを使い、位置・文字高のずれを防ぐ。
+                geometry: { type: 'Point', coordinates: [b.rawMinX, b.rawMinY] },
+                properties: {
+                  text: b.text,
+                  fontSize: +((b.rawMaxY - b.rawMinY) * 0.9).toFixed(3),
+                  layerType: 'label',
+                  source: 'ocr',
+                  confidence: b.confidence,
+                }
+              });
+            }
+            console.log('[OCR] 実テキストとして採用（要目視確認）:', adoptedBoxes.size, '件', [...adoptedBoxes].map(b => `${b.text}(${b.confidence.toFixed(0)})`));
+          }
         } catch (e) {
           console.warn('[OCR] 失敗（境界線のみで続行）:', e);
         }
