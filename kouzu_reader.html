@@ -770,7 +770,7 @@ async function processDocument() {
             rawMaxX: w.bbox.x1 * mmPerPxProc,
             rawMinY: (pH - w.bbox.y1) * mmPerPxProc,
             rawMaxY: (pH - w.bbox.y0) * mmPerPxProc,
-            text: w.text, confidence: w.confidence,
+            text: w.text, confidence: w.confidence, minCharConf: w.minCharConf,
           }));
 
           // 線分とOCR領域(矩形)の交差部分の長さを正確に求める(Liang-Barsky型の
@@ -831,6 +831,10 @@ async function processDocument() {
           // それでも誤読が完全にゼロになる保証はないため、DXF/JWC出力後は
           // 必ず元のスキャン画像と目視で照合すること。
           const LABEL_MIN_CONF = 85;
+          // 単語平均confidenceだけでなく、最も自信のなかった1文字の
+          // confidenceにも下限を設ける（"70"の"7"の上線が薄くて"1"に
+          // 誤読される等、一部の文字だけ怪しいケースを弾くため）
+          const LABEL_MIN_CHAR_CONF = 80;
           const DOM_RATIO_THRESHOLD = 0.6; // 支配的な領域単独でチェーンの60%以上を説明できること
           const CHIBAN_RE = /^[0-9]{1,5}(-[0-9]{1,3})?$/;
           const adoptedBoxes = new Set();
@@ -843,7 +847,9 @@ async function processDocument() {
             reclassified++;
             const { domBox, domRatio } = dominantBox(lenByBox, total);
             if (domBox && domRatio >= DOM_RATIO_THRESHOLD &&
-                domBox.confidence >= LABEL_MIN_CONF && CHIBAN_RE.test(domBox.text)) {
+                domBox.confidence >= LABEL_MIN_CONF &&
+                domBox.minCharConf >= LABEL_MIN_CHAR_CONF &&
+                CHIBAN_RE.test(domBox.text)) {
               adoptedBoxes.add(domBox);
             }
           }
@@ -883,24 +889,33 @@ async function processDocument() {
       }
 
       // 方角記号(コンパスマーク)は、この地図フォーマットではどのPDFでも
-      // ページ左上隅のほぼ同じ位置（実測: 幅方向8〜18%・高さ方向8〜19%付近）
-      // にある。チェーン全体がこの固定領域に収まる境界線候補だけを方角レイヤへ
-      // 振り分ける（領域を少しでもはみ出す通常の境界線・地番文字は対象外）。
+      // ページ左上隅のほぼ同じ位置にある固定の装飾記号。
+      // 以前は「左上の固定領域内にある境界線候補を方角レイヤへ振り替える」
+      // 方式にしていたが、その付近には実際の区画線・地番も存在するため、
+      // 領域判定だけでは本物の境界線まで方角レイヤへ巻き込んでしまっていた。
+      // → 検出は行わず、常に同じ位置に簡易的な北矢印を直接描画する方式に変更。
+      // (元図面の記号を忠実に再現するものではないが、方角を示す情報としては
+      //  等価であり、誤検出のリスクがない)
       {
         const pageWmm = procCanvas.width * mmPerPxProc;
         const pageHmm = pH * mmPerPxProc;
-        const DIR_X_MAX = pageWmm * 0.22;
-        const DIR_Y_MIN = pageHmm * (1 - 0.22); // Y上向き座標系なので「上」はpageHmmに近い側
-        let dirCount = 0;
-        for (const f of features) {
-          if (f.properties.layerType !== 'border') continue;
-          const pts = f.geometry.coordinates;
-          if (pts.every(([x, y]) => x <= DIR_X_MAX && y >= DIR_Y_MIN)) {
-            f.properties.layerType = 'direction';
-            dirCount++;
-          }
-        }
-        console.log('[方角] 左上固定領域内で方角レイヤへ分類:', dirCount, '件');
+        const shaftX   = pageWmm * 0.12;
+        const shaftBotY = pageHmm * 0.80;   // Y上向き座標系: 上へ向かうほどYが大きい
+        const shaftTopY = pageHmm * 0.86;
+        const headW = pageWmm * 0.012;
+        const headH = pageHmm * 0.012;
+        const dirFeature = (coords) => ({
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: coords },
+          properties: { layerType: 'direction' },
+        });
+        features.push(
+          // 矢印の軸（下→上）
+          dirFeature([[shaftX, shaftBotY], [shaftX, shaftTopY]]),
+          // 矢じり（先端の山形）
+          dirFeature([[shaftX - headW, shaftTopY - headH], [shaftX, shaftTopY], [shaftX + headW, shaftTopY - headH]]),
+        );
+        console.log('[方角] 固定位置に北矢印を描画:', { shaftX, shaftBotY, shaftTopY });
       }
     }
 
@@ -1720,11 +1735,22 @@ async function ocrDetectDigitRegions(canvas) {
     });
     const { data } = await worker.recognize(canvas);
     const words = (data.words || []).filter(w => w.text && w.text.trim().length > 0);
-    return words.map(w => ({
-      text: w.text.trim(),
-      confidence: w.confidence,
-      bbox: w.bbox, // {x0,y0,x1,y1} 単位: canvasのピクセル座標
-    }));
+    return words.map(w => {
+      // 単語全体の平均confidenceだけでは、"7"の上線が薄くて"1"に見える等、
+      // 1文字だけ誤読した場合でも他の文字の高confidenceに引きずられて
+      // 平均が高く出てしまうことがある（"70"→"10"の誤読等）。
+      // 文字単位(symbols)の最低confidenceも別途持たせ、置換の可否判定に使う。
+      const symbols = w.symbols || [];
+      const minCharConf = symbols.length
+        ? Math.min(...symbols.map(s => s.confidence))
+        : w.confidence;
+      return {
+        text: w.text.trim(),
+        confidence: w.confidence,
+        minCharConf,
+        bbox: w.bbox, // {x0,y0,x1,y1} 単位: canvasのピクセル座標
+      };
+    });
   } finally {
     await worker.terminate();
   }
