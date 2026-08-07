@@ -183,21 +183,24 @@
       <select id="pageSelect"><option value="1">1</option></select>
     </div>
 
-    <div class="sg">
-      <label>解像度 (DPI) <span class="val" id="dpiVal">300</span></label>
-      <input type="range" id="dpi" min="72" max="400" value="300" step="10"
+    <!-- 解像度(DPI)・最小面積・輪郭の精細さは実PDFで何度もテストした結果、
+         これ以上ユーザーが毎回調整する意味がないと判断し固定値にした。
+         値そのものは維持し、UI上の表示のみ省略する（挙動を変えないため）。 -->
+    <div class="sg" style="display:none">
+      <label>解像度 (DPI) <span class="val" id="dpiVal">400</span></label>
+      <input type="range" id="dpi" min="72" max="400" value="400" step="10"
              oninput="document.getElementById('dpiVal').textContent=this.value">
       <div class="hint">数値公図は300〜400推奨。高いほど処理が遅くなります</div>
     </div>
 
-    <div class="sg">
+    <div class="sg" style="display:none">
       <label>最小面積（px²） <span class="val" id="minAreaVal">500</span></label>
       <input type="range" id="minArea" min="50" max="10000" value="500" step="50"
              oninput="document.getElementById('minAreaVal').textContent=this.value">
       <div class="hint">これより小さい領域はノイズとして除去</div>
     </div>
 
-    <div class="sg">
+    <div class="sg" style="display:none">
       <label>輪郭の精細さ <span class="val" id="epsLabel">中</span></label>
       <input type="range" id="epsilon" min="1" max="10" value="4" step="1"
              oninput="updateEpsLabel(+this.value)">
@@ -209,7 +212,10 @@
       <input type="checkbox" id="showContours" checked>
     </div>
 
-    <div class="row" style="margin-top:4px">
+    <!-- テキスト抽出・公図レイアウト最適化・薄線強化は「常にONが正解」の
+         品質パラメータのためON固定・非表示化した。破線スキップ・斜線強化は
+         PDFの内容や意図によって結果が変わる設定なので表示を残している。 -->
+    <div class="row" style="display:none">
       <label>テキスト（地番）を抽出・表示</label>
       <input type="checkbox" id="extractText" checked>
     </div>
@@ -219,11 +225,10 @@
       <input type="checkbox" id="skipDash">
     </div>
 
-    <div class="row" style="margin-top:6px">
+    <div class="row" style="display:none">
       <label>公図レイアウト最適化</label>
       <input type="checkbox" id="kouzuOpt" checked>
     </div>
-    <div class="hint" style="margin:-2px 0 4px">上7%(ヘッダー)・下27%(表)を自動マスク</div>
 
     <div class="row" style="margin-top:6px">
       <label>斜線強化（ラスター優先）</label>
@@ -231,11 +236,10 @@
     </div>
     <div class="hint" style="margin:-2px 0 4px">斜めの区画線が読めない場合にON</div>
 
-    <div class="row" style="margin-top:6px">
+    <div class="row" style="display:none">
       <label>薄線強化（適応しきい値）</label>
       <input type="checkbox" id="thinLine" checked>
     </div>
-    <div class="hint" style="margin:-2px 0 4px">Otsuより高感度。斜め線・スキャン公図の極細線に有効</div>
 
     <hr class="sep">
 
