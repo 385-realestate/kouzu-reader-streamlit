@@ -726,11 +726,23 @@ async function processDocument() {
         setStatus('OCRで地番文字を認識中…（時間がかかります）', 'run');
         await tick(); setProgress(85);
         try {
-          const ocrWordsRaw = await ocrDetectDigitRegions(procCanvas);
+          // 生画像ではなく境界線抽出と同じ二値化画像をOCRに渡す
+          // （用紙の色ムラ・スキャンノイズを除去し認識率を上げる）
+          const ocrCanvas = buildBinarizedCanvasForOcr(procCanvas, document.getElementById('thinLine').checked);
+          const ocrWordsRaw = await ocrDetectDigitRegions(ocrCanvas);
           console.log('[OCR] 検出語数(生):', ocrWordsRaw.length, ocrWordsRaw);
 
+          // 地番文字の高さは、縮尺に関わらず「紙面上の印字サイズ」で決まり、
+          // DPIが固定されている今は毎回ほぼ同じピクセル高になる（実測値から
+          // DPI400で概ね45〜150px程度）。この範囲から大きく外れる語（日付欄の
+          // 大きな見出し文字や、ノイズの小さな断片等）を足切りすることで
+          // 誤検出を減らす。DPIを変えても比例するよう procDpi/400 で換算する。
+          const dpiScale = procDpi / 400;
+          const DIGIT_H_MIN_PX = 40 * dpiScale;
+          const DIGIT_H_MAX_PX = 160 * dpiScale;
+
           // マスク用フィルタ: 数字を1文字以上含み、信頼度が低すぎない・
-          // 極端に細長い(誤認識の帯状ノイズ等)ものは除外する
+          // 極端に細長い(誤認識の帯状ノイズ等)・想定文字高から外れるものは除外する
           const MASK_MIN_CONF = 25;
           const ocrWords = ocrWordsRaw.filter(w => {
             if (w.confidence < MASK_MIN_CONF) return false;
@@ -738,7 +750,9 @@ async function processDocument() {
             const bw = w.bbox.x1 - w.bbox.x0, bh = w.bbox.y1 - w.bbox.y0;
             if (bw <= 0 || bh <= 0) return false;
             const aspect = Math.max(bw, bh) / Math.min(bw, bh);
-            return aspect <= 15; // 細長すぎる帯はノイズとみなす
+            if (aspect > 15) return false; // 細長すぎる帯はノイズとみなす
+            if (bh < DIGIT_H_MIN_PX || bh > DIGIT_H_MAX_PX) return false; // 想定文字高から外れる
+            return true;
           });
           console.log('[OCR] マスク採用語数:', ocrWords.length, ocrWords);
 
@@ -1641,6 +1655,42 @@ async function extractPdfText(pageNum, scaleDenom, dpi) {
   }
   console.log('[テキスト抽出] 総件数:', features.length);
   return features;
+}
+
+// =====================================================================
+// OCR前処理: 生画像ではなく、境界線抽出と同じ二値化(黒文字/線・白背景)を
+// 適用した画像をOCRに渡す。用紙の色ムラ・薄いグレー地・スキャンノイズを
+// 除去でき、Tesseractの認識率向上が見込める
+// （境界線抽出側の適応しきい値はOtsuよりrecall/precisionともに高いことを
+//  合成テストで確認済み。参照: processRasterLines内のコメント）。
+// =====================================================================
+function buildBinarizedCanvasForOcr(srcCanvas, thinLine) {
+  const W = srcCanvas.width, H = srcCanvas.height;
+  const srcCtx = srcCanvas.getContext('2d');
+  const data = srcCtx.getImageData(0, 0, W, H).data;
+  const gray = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++)
+    gray[i] = (0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2]) | 0;
+
+  const bin = thinLine
+    ? adaptiveThinThreshold(gray, W, H, 20)
+    : (() => {
+        const thresh = otsuThreshold(gray, W * H);
+        const b = new Uint8Array(W * H);
+        for (let i = 0; i < W * H; i++) b[i] = gray[i] < thresh ? 1 : 0;
+        return b;
+      })();
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = W; outCanvas.height = H;
+  const outCtx = outCanvas.getContext('2d');
+  const outData = outCtx.createImageData(W, H);
+  for (let i = 0; i < W * H; i++) {
+    const v = bin[i] ? 0 : 255; // 前景(線・文字)=黒、背景=白
+    outData.data[i*4] = v; outData.data[i*4+1] = v; outData.data[i*4+2] = v; outData.data[i*4+3] = 255;
+  }
+  outCtx.putImageData(outData, 0, 0);
+  return outCanvas;
 }
 
 // =====================================================================
