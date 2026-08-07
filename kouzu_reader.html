@@ -867,6 +867,27 @@ async function processDocument() {
           console.warn('[OCR] 失敗（境界線のみで続行）:', e);
         }
       }
+
+      // 方角記号(コンパスマーク)は、この地図フォーマットではどのPDFでも
+      // ページ左上隅のほぼ同じ位置（実測: 幅方向8〜18%・高さ方向8〜19%付近）
+      // にある。チェーン全体がこの固定領域に収まる境界線候補だけを方角レイヤへ
+      // 振り分ける（領域を少しでもはみ出す通常の境界線・地番文字は対象外）。
+      {
+        const pageWmm = procCanvas.width * mmPerPxProc;
+        const pageHmm = pH * mmPerPxProc;
+        const DIR_X_MAX = pageWmm * 0.22;
+        const DIR_Y_MIN = pageHmm * (1 - 0.22); // Y上向き座標系なので「上」はpageHmmに近い側
+        let dirCount = 0;
+        for (const f of features) {
+          if (f.properties.layerType !== 'border') continue;
+          const pts = f.geometry.coordinates;
+          if (pts.every(([x, y]) => x <= DIR_X_MAX && y >= DIR_Y_MIN)) {
+            f.properties.layerType = 'direction';
+            dirCount++;
+          }
+        }
+        console.log('[方角] 左上固定領域内で方角レイヤへ分類:', dirCount, '件');
+      }
     }
 
     setProgress(85);
