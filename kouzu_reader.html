@@ -229,6 +229,14 @@
       <label>公図レイアウト最適化</label>
       <input type="checkbox" id="kouzuOpt" checked>
     </div>
+    <div class="row" style="display:none">
+      <label>上部除外％（ヘッダー等）</label>
+      <input type="number" id="topExclPct" value="7" min="0" max="40" step="1" style="width:56px">
+    </div>
+    <div class="row" style="display:none">
+      <label>下部除外％（表・凡例等）</label>
+      <input type="number" id="botExclPct" value="27" min="0" max="60" step="1" style="width:56px">
+    </div>
 
     <div class="row" style="margin-top:6px">
       <label>斜線強化（ラスター優先）</label>
@@ -258,6 +266,16 @@
           <option value="2500">1:2500</option>
         </select>
         <div class="hint">公図に記載の縮尺を選択してください。DXF・JWCの座標が実寸mm（実世界）に変換されます。</div>
+        <div id="scaleCheckPanel" style="display:none;margin-top:8px;padding:7px;background:#10172d;border:1px solid #e0a800;border-radius:5px">
+          <div style="font-size:11px;color:#ffd966;font-weight:bold;margin-bottom:5px">① 下の画像で「出力縮尺」を確認</div>
+          <div style="background:white;overflow:auto;max-height:190px;border-radius:3px">
+            <canvas id="scaleCheckCanvas" style="display:block;width:100%;height:auto"></canvas>
+          </div>
+          <label style="display:flex;align-items:flex-start;gap:7px;margin-top:7px;color:#fff;font-size:11px;line-height:1.5;cursor:pointer">
+            <input type="checkbox" id="scaleConfirmed" style="margin-top:2px">
+            <span>② 画像の出力縮尺と、上で選んだ縮尺が一致していることを確認しました</span>
+          </label>
+        </div>
       </div>
       <div style="font-size:10px;color:#666;background:#0f3460;border-radius:4px;padding:6px;margin-bottom:4px">
         💡 変換式: 実寸 = pixel × (25.4/DPI) × 縮尺分母<br>
@@ -495,6 +513,18 @@ document.getElementById('cadScale').addEventListener('change', function() {
   const dpi   = parseInt(document.getElementById('dpi').value);
   const scale = parseInt(this.value);
   document.getElementById('mmPerPxCalc').textContent = (25.4 / dpi * scale).toFixed(1);
+  resetScaleConfirmation();
+});
+
+function resetScaleConfirmation() {
+  const check = document.getElementById('scaleConfirmed');
+  check.checked = false;
+  document.getElementById('processBtn').disabled = true;
+}
+
+document.getElementById('scaleConfirmed').addEventListener('change', function() {
+  document.getElementById('processBtn').disabled = !pdfDoc || !this.checked;
+  if (this.checked) setStatus('縮尺確認済み →「変換実行」を押してください', 'ok');
 });
 
 // =====================================================================
@@ -563,10 +593,14 @@ async function loadFile(file) {
     sel.innerHTML = '';
     for (let i = 1; i <= pdfDoc.numPages; i++) sel.innerHTML += `<option value="${i}">${i}</option>`;
 
-    document.getElementById('processBtn').disabled = false;
-    setStatus('読込完了 →「変換実行」を押してください', 'ok');
+    document.getElementById('cadBody').classList.add('open');
+    document.getElementById('cadToggle').textContent = '▼ JWCAD出力設定';
+    document.getElementById('scaleCheckPanel').style.display = 'block';
+    resetScaleConfirmation();
+    setStatus('下部の出力縮尺を確認し、縮尺を選択してください', 'run');
     setProgress(0);
     await quickPreview(1);
+    await renderScaleCheck(1);
   } catch (e) {
     setStatus('エラー: ' + e.message, 'err'); setProgress(0);
   }
@@ -581,6 +615,30 @@ async function quickPreview(pageNum) {
   centerCanvas();
 }
 
+// 公図の縮尺欄はPDFテキストではなく画像として埋め込まれていることが多い。
+// OCRの誤判定で距離を壊さないよう、ページ下部を拡大表示して利用者に確認してもらう。
+async function renderScaleCheck(pageNum) {
+  const full = await renderPage(pageNum, 180);
+  const cropY = Math.floor(full.height * 0.76);
+  const cropH = full.height - cropY;
+  const out = document.getElementById('scaleCheckCanvas');
+  out.width = full.width;
+  out.height = cropH;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(full, 0, cropY, full.width, cropH, 0, 0, out.width, cropH);
+}
+
+document.getElementById('pageSelect').addEventListener('change', async function() {
+  if (!pdfDoc) return;
+  const pageNum = parseInt(this.value);
+  resetScaleConfirmation();
+  setStatus('ページ下部の出力縮尺を確認してください', 'run');
+  await quickPreview(pageNum);
+  await renderScaleCheck(pageNum);
+});
+
 // =====================================================================
 // PDF レンダリング
 // =====================================================================
@@ -593,6 +651,35 @@ async function renderPage(pageNum, dpi) {
   canvas.height  = Math.round(viewport.height);
   await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
   return canvas;
+}
+
+// =====================================================================
+// PDFの一部領域だけを指定DPIで直接再レンダリングする。
+// 既にラスター化済みのcanvasをCanvas2Dで拡大(補間)するのではなく、
+// PDF自体を高DPIで再描画するため、フォントサイズが小さく低DPIでは
+// 潰れていた文字も、より多くの実ピクセル情報を得られる。
+// 領域外(x1,y1がページ範囲を超える等)は自動的にクランプする。
+// pxBbox・dpiは同一の基準（page.getViewport({scale: dpi/72})のpx空間、
+// 左上原点・下向きY）で統一すること。
+// =====================================================================
+async function renderPdfRegion(pageNum, dpi, x0, y0, x1, y1) {
+  const page     = await pdfDoc.getPage(pageNum);
+  const scale    = dpi / 72;
+  const viewport = page.getViewport({ scale });
+  const fx0 = Math.max(0, Math.min(x0, viewport.width));
+  const fy0 = Math.max(0, Math.min(y0, viewport.height));
+  const fx1 = Math.max(0, Math.min(x1, viewport.width));
+  const fy1 = Math.max(0, Math.min(y1, viewport.height));
+  const cw  = Math.max(1, Math.round(fx1 - fx0));
+  const ch  = Math.max(1, Math.round(fy1 - fy0));
+  const canvas = document.createElement('canvas');
+  canvas.width  = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+  // ページ全体のビューポート座標系のうち(fx0,fy0)をクロップcanvasの原点へ平行移動
+  const transform = [1, 0, 0, 1, -fx0, -fy0];
+  await page.render({ canvasContext: ctx, viewport, transform }).promise;
+  return { canvas, viewportWidth: viewport.width, viewportHeight: viewport.height };
 }
 
 // =====================================================================
@@ -642,6 +729,13 @@ async function processDocument() {
     // ヒューリスティクスで「文字らしき小図形」「方角記号らしき図形」を分類する。
     classifyVectorFeatures(features, scaleDenom);
 
+    // 公図最適化のヘッダー・表除外範囲（UIから可変。既定 上7%/下27%）。
+    // ベクター実テキストのフィルタ・ラスター行マスク・OCR高DPI帯のいずれも
+    // この値を共通で使う（別々の固定値だと文書によって除外範囲がズレる）。
+    const kouzuOpt    = document.getElementById('kouzuOpt').checked;
+    const topExclFrac = Math.max(0, Math.min(0.4, (parseFloat(document.getElementById('topExclPct').value) || 0) / 100));
+    const botExclFrac = Math.max(0, Math.min(0.6, (parseFloat(document.getElementById('botExclPct').value) || 0) / 100));
+
     // テキスト（地番）抽出
     // ※ラスター処理でtext層を保持するかどうかの判定に使うため、
     //   ラスター処理より先に実行する（順序を変えないこと）
@@ -649,11 +743,11 @@ async function processDocument() {
     if (document.getElementById('extractText').checked) {
       setStatus('テキスト（地番）を抽出中…', 'run'); await tick();
       textFeatures = await extractPdfText(pageNum, scaleDenom, dpi);
-      // 公図最適化: ヘッダー(上7%)・テーブル(下27%)範囲のテキストを除外
-      if (document.getElementById('kouzuOpt').checked) {
+      // 公図最適化: ヘッダー(上)・テーブル(下)範囲のテキストを除外
+      if (kouzuOpt) {
         const pageHmm  = canvas.height / dpi * 25.4 * scaleDenom;
-        const activeBotMM = pageHmm * 0.27;
-        const activeTopMM = pageHmm * 0.93;
+        const activeBotMM = pageHmm * botExclFrac;
+        const activeTopMM = pageHmm * (1 - topExclFrac);
         textFeatures = textFeatures.filter(f => {
           const y = f.geometry.coordinates[1];
           return y >= activeBotMM && y <= activeTopMM;
@@ -670,7 +764,28 @@ async function processDocument() {
       console.log('[斜線強化] ベクター0件 → ラスター処理');
     }
 
-    if (features.length === 0 || forceRaster) {
+    const needRasterTrace = (features.length === 0 || forceRaster);
+    // ベクターPDFで実テキストが1件も無い場合（地番がアウトライン化された
+    // 図形のみで、実テキストとして埋め込まれていないケース）も、OCRによる
+    // 文字読み取りを試みる。従来はラスター処理(needRasterTrace)の内側でしか
+    // OCRを実行していなかったため、ベクターパスが取得できる文書
+    // （features.length>0）ではアウトライン化された地番が永久に読み取られない
+    // 問題があった。needOcrTextはneedRasterTraceと独立に判定する。
+    const needOcrText = (textFeatures.length === 0 && document.getElementById('extractText').checked);
+
+    // ラスタートレースが必要な場合のみ、処理用の高解像度canvas(procCanvas)を
+    // 用意する。OCRはprocDpiに依存しない固定DPIで別途PDFから直接
+    // レンダリングするため、ここでは不要（下記OCRブロック参照）。
+    let procDpi, procCanvas, mmPerPxProc, pH;
+    if (needRasterTrace) {
+      // DPIキャップ撤廃：ユーザー指定DPIをそのまま使用
+      procDpi     = dpi;
+      procCanvas  = procDpi !== dpi ? await renderPage(pageNum, procDpi) : canvas;
+      mmPerPxProc = 25.4 / procDpi * scaleDenom;
+      pH          = procCanvas.height;
+    }
+
+    if (needRasterTrace) {
       // ③ ベクター0件 または 斜線強化モード → Cannyラスター処理
       const msg = features.length === 0
         ? `ベクター: 0件 → Cannyラスター処理中…`
@@ -678,23 +793,17 @@ async function processDocument() {
       setStatus(msg, 'run');
       await tick(); setProgress(55);
 
-      // DPIキャップ撤廃：ユーザー指定DPIをそのまま使用
-      const procDpi    = dpi;
-      const procCanvas = procDpi !== dpi ? await renderPage(pageNum, procDpi) : canvas;
-      const imgData    = procCanvas.getContext('2d')
-                          .getImageData(0, 0, procCanvas.width, procCanvas.height);
+      const imgData = procCanvas.getContext('2d')
+                        .getImageData(0, 0, procCanvas.width, procCanvas.height);
 
-      const kouzuOpt  = document.getElementById('kouzuOpt').checked;
       const thinLine  = document.getElementById('thinLine').checked;
       setStatus('3レイヤ分離中 (外枠・文字・境界線)…', 'run'); await tick(); setProgress(65);
       const lines = processRasterLines(imgData.data, procCanvas.width, procCanvas.height,
-                                       minAreaPx, epsRaw, kouzuOpt, thinLine);
+                                       minAreaPx, epsRaw, kouzuOpt, thinLine, topExclFrac, botExclFrac);
       console.log('[ラスター] 検出ライン数:', lines.length, '画像サイズ:', procCanvas.width, 'x', procCanvas.height, '公図最適化:', kouzuOpt);
       setProgress(80); await tick();
 
       // ピクセル座標を実寸mm（Y上向き）に変換してから格納
-      const mmPerPxProc = 25.4 / procDpi * scaleDenom;
-      const pH = procCanvas.height;
       features = lines.map(({ pts, pixLen, straightness, layerType }, i) => ({
         type: 'Feature',
         geometry: {
@@ -713,31 +822,69 @@ async function processDocument() {
       }));
       coordSystem = 'mm_realworld';
       lastDpi     = procDpi;
+    }
 
-      // PDF内に実テキストが1件も無い（完全スキャンPDF）場合、OCR(Tesseract.js)で
-      // 地番数字らしき領域を検出し、その範囲にある境界線候補チェーンを文字レイヤへ
-      // 振り分ける。OCRで検出できなかった部分は境界線色のまま残る
-      // （直線度等の幾何学的な推測には頼らない）。
-      // さらに、信頼度が高く地番らしい形式に一致した語は、実際の文字列として
-      // textFeatures（Point + TEXT）に採用し、対応する輪郭チェーンは削除する
-      // （輪郭と実テキストの二重表示を避けるため。低信頼度の語は従来通り
-      //  色分けのみに留め、実テキストとしては採用しない）。
-      if (textFeatures.length === 0 && document.getElementById('extractText').checked) {
-        setStatus('OCRで地番文字を認識中…（時間がかかります）', 'run');
-        await tick(); setProgress(85);
-        try {
-          // 二値化画像をOCRに渡す方式・想定文字高フィルタは、別PDFで検証したところ
-          // 逆に検出漏れ(それまで緑で認識できていたものまで境界線色に戻る)を
-          // 増やしてしまうことが判明したため撤回した。文字高は文書ごとの印字
-          // サイズ差が大きく、DPI固定だけでは一般化できなかった。
-          // マスク検出は元の生画像(procCanvas)に対して行う（二値化はしない）。
-          const ocrWordsRaw = await ocrDetectDigitRegions(procCanvas);
-          console.log('[OCR] 検出語数(生):', ocrWordsRaw.length, ocrWordsRaw);
+    // PDF内に実テキストが1件も無い場合、OCR(Tesseract.js)で地番数字らしき
+    // 領域を検出し、その範囲にある候補図形（ラスター起源の'border'チェーン、
+    // またはベクター起源の小図形分類で'text'と推測された図形のいずれか）を
+    // 文字レイヤへ振り分ける。OCRで検出できなかった部分は元のレイヤ色の
+    // まま残る（直線度等の幾何学的な推測だけには頼らない）。
+    // さらに、信頼度が高く地番らしい形式に一致した語は、実際の文字列として
+    // textFeatures（Point + TEXT）に採用し、対応する輪郭チェーンは削除する
+    // （輪郭と実テキストの二重表示を避けるため。低信頼度の語は従来通り
+    //  色分けのみに留め、実テキストとしては採用しない）。
+    if (needOcrText) {
+      setStatus('OCRで地番文字を認識中…（時間がかかります）', 'run');
+      await tick(); setProgress(85);
+      try {
+          // 実データ検証の結果、Tesseract.jsは「解像度が高いほど良い」の逆で、
+          // 400dpi前後の高解像度では密集した区画の地番をほぼ検出できず、
+          // 150dpi前後まで下げると同じ文字が95%前後の信頼度で安定して読める
+          // ことが分かった（procDpiの既定値は400のため、procCanvasをそのまま
+          // OCRへ渡す従来方式・高DPI補完パスはいずれも逆効果だった）。
+          // そのため、procDpi/procCanvasには依存せず、固定の低め〜中程度の
+          // DPI(OCR_SCAN_DPIS)でPDFの有効領域(ヘッダー・表を除いた帯)を直接
+          // 再レンダリングしてOCRする。複数DPIを試して結果をマージすることで、
+          // 文字サイズが文書内でばらついていても片方のDPIで拾えるようにする。
+          const OCR_SCAN_DPIS = [120, 150, 300];
+          const bandTopFrac = kouzuOpt ? topExclFrac : 0;
+          const bandBotFrac = kouzuOpt ? (1 - botExclFrac) : 1;
+
+          let ocrWordsRawAll = [];
+          for (const scanDpi of OCR_SCAN_DPIS) {
+            try {
+              setStatus(`OCRで地番文字を認識中…（${scanDpi}dpi）`, 'run'); await tick();
+              const scale  = scanDpi / 72;
+              const fullVp = (await pdfDoc.getPage(pageNum)).getViewport({ scale });
+              const y0Full = Math.round(fullVp.height * bandTopFrac);
+              const y1Full = Math.round(fullVp.height * bandBotFrac);
+              const x1Full = Math.round(fullVp.width);
+              const { canvas: bandCanvas, viewportHeight: scanFullH } =
+                await renderPdfRegion(pageNum, scanDpi, 0, y0Full, x1Full, y1Full);
+              console.log(`[OCR ${scanDpi}dpi] 帯サイズ:`, bandCanvas.width, 'x', bandCanvas.height);
+              const wordsRaw = await ocrDetectDigitRegions(bandCanvas);
+              console.log(`[OCR ${scanDpi}dpi] 検出語数(生):`, wordsRaw.length, wordsRaw);
+              const words = wordsRaw.map(w => ({
+                ...w,
+                srcDpi: scanDpi,
+                // 帯のローカルpx座標 → ページ全体px座標(scanDpi基準)へ戻す
+                pxBboxFull: {
+                  x0: w.bbox.x0, x1: w.bbox.x1,
+                  y0: w.bbox.y0 + y0Full, y1: w.bbox.y1 + y0Full,
+                },
+                pageHeightPx: scanFullH,
+              }));
+              ocrWordsRawAll = ocrWordsRawAll.concat(words);
+            } catch (e) {
+              console.warn(`[OCR ${scanDpi}dpi] 失敗:`, e);
+            }
+          }
+          console.log('[OCR] 検出語数(合計・複数DPIマージ):', ocrWordsRawAll.length);
 
           // マスク用フィルタ: 数字を1文字以上含み、信頼度が低すぎない・
           // 極端に細長い(誤認識の帯状ノイズ等)ものは除外する
           const MASK_MIN_CONF = 25;
-          const ocrWords = ocrWordsRaw.filter(w => {
+          const ocrWords = ocrWordsRawAll.filter(w => {
             if (w.confidence < MASK_MIN_CONF) return false;
             if (!/[0-9]/.test(w.text)) return false;
             const bw = w.bbox.x1 - w.bbox.x0, bh = w.bbox.y1 - w.bbox.y0;
@@ -750,20 +897,31 @@ async function processDocument() {
           // マスク判定用に少し余白(マージン)を持たせたbboxと、TEXT配置用の
           // 生bbox(マージン無し)を分けて保持する。マージン込みbboxをTEXT位置
           // 計算にも使うと、挿入位置が左下へ・文字高が実際より大きくずれるため。
-          const MARGIN_PX = Math.max(3, Math.round(Math.min(procCanvas.width, procCanvas.height) * 0.003));
-          const ocrBoxesMm = ocrWords.map(w => ({
-            minX: (w.bbox.x0 - MARGIN_PX) * mmPerPxProc,
-            maxX: (w.bbox.x1 + MARGIN_PX) * mmPerPxProc,
-            // ピクセルYは上原点、実寸mmは下原点(Y上向き)なので反転させる
-            minY: (pH - (w.bbox.y1 + MARGIN_PX)) * mmPerPxProc,
-            maxY: (pH - (w.bbox.y0 - MARGIN_PX)) * mmPerPxProc,
-            rawMinX: w.bbox.x0 * mmPerPxProc,
-            rawMaxX: w.bbox.x1 * mmPerPxProc,
-            rawMinY: (pH - w.bbox.y1) * mmPerPxProc,
-            rawMaxY: (pH - w.bbox.y0) * mmPerPxProc,
-            text: w.text, confidence: w.confidence, minCharConf: w.minCharConf,
-            pxBbox: w.bbox, // 元画像(procCanvas)ピクセル座標。二段階検証の切り出しに使う
-          }));
+          // 複数DPIパスでdpiが異なるため、mm換算は語ごとのsrcDpiを使う。
+          // マージンは各語自身のsrcDpi空間でのpx数で固定する（どのDPIパスでも
+          // 見た目上ほぼ同じだけの余白になる）。
+          const MARGIN_PX_AT_SRC = 3;
+          const ocrBoxesMm = ocrWords.map(w => {
+            const dpiW      = w.srcDpi;
+            const mmPerPxW  = 25.4 / dpiW * scaleDenom;
+            const marginPxW = MARGIN_PX_AT_SRC;
+            const pageHPxW  = w.pageHeightPx;
+            const bb        = w.pxBboxFull;
+            return {
+              minX: (bb.x0 - marginPxW) * mmPerPxW,
+              maxX: (bb.x1 + marginPxW) * mmPerPxW,
+              // ピクセルYは上原点、実寸mmは下原点(Y上向き)なので反転させる
+              minY: (pageHPxW - (bb.y1 + marginPxW)) * mmPerPxW,
+              maxY: (pageHPxW - (bb.y0 - marginPxW)) * mmPerPxW,
+              rawMinX: bb.x0 * mmPerPxW,
+              rawMaxX: bb.x1 * mmPerPxW,
+              rawMinY: (pageHPxW - bb.y1) * mmPerPxW,
+              rawMaxY: (pageHPxW - bb.y0) * mmPerPxW,
+              text: w.text, confidence: w.confidence, minCharConf: w.minCharConf,
+              srcDpi: dpiW,
+              pxBboxFull: bb, // ページ全体px座標(srcDpi基準)。二段階検証のPDF再クロップに使う
+            };
+          });
 
           // 線分とOCR領域(矩形)の交差部分の長さを正確に求める(Liang-Barsky型の
           // 線分クリッピング)。以前は「線分の中点が領域内かどうか」で線分全長を
@@ -818,21 +976,30 @@ async function processDocument() {
           }
 
           const INSIDE_RATIO_THRESHOLD = 0.5;
-          // 実テキストとして自動採用する条件は、地番＝識別情報であることを踏まえ
-          // 厳しめに設定する（マスク用の信頼度より大幅に高い信頼度を要求する）。
+          // 実テキストとしての採否は、後段の二段階検証（高倍率クロップでの
+          // 再読取・完全一致チェック）が最終的な精度ゲートを担うため、
+          // ここでの一次しきい値は「二段階検証に進めるかどうか」の足切りに
+          // 留め、低めに設定する（旧: conf85/charConf80 は足切りが強すぎて
+          // 正しい地番の多くが二段階検証にすら進めず未採用になっていた）。
           // それでも誤読が完全にゼロになる保証はないため、DXF/JWC出力後は
           // 必ず元のスキャン画像と目視で照合すること。
-          const LABEL_MIN_CONF = 85;
+          const LABEL_MIN_CONF = 40;
           // 単語平均confidenceだけでなく、最も自信のなかった1文字の
           // confidenceにも下限を設ける（"70"の"7"の上線が薄くて"1"に
-          // 誤読される等、一部の文字だけ怪しいケースを弾くため）
-          const LABEL_MIN_CHAR_CONF = 80;
-          const DOM_RATIO_THRESHOLD = 0.6; // 支配的な領域単独でチェーンの60%以上を説明できること
+          // 誤読される等、一部の文字だけ怪しいケースを弾くため）。
+          // こちらも二段階検証頼みで足切りを緩める。
+          const LABEL_MIN_CHAR_CONF = 30;
+          const DOM_RATIO_THRESHOLD = 0.5; // 支配的な領域単独でチェーンの50%以上を説明できること
           const CHIBAN_RE = /^[0-9]{1,5}(-[0-9]{1,3})?$/;
           const adoptedBoxes = new Set();
           let reclassified = 0;
           for (const f of features) {
-            if (f.properties.layerType !== 'border') continue;
+            // ラスター起源のチェーンは全て'border'として渡ってくるが、
+            // ベクター起源の場合はclassifyVectorFeatures()が既に小図形を
+            // 'text'と推測済みのことがある（アウトライン化された地番数字）。
+            // どちらもOCRでの再判定・実テキスト化の対象にする。
+            const lt = f.properties.layerType;
+            if (lt !== 'border' && lt !== 'text') continue;
             const { ratio, lenByBox, total } = matchedBoxes(f);
             if (ratio < INSIDE_RATIO_THRESHOLD) continue;
             f.properties.layerType = 'text';
@@ -847,14 +1014,20 @@ async function processDocument() {
           }
           console.log('[OCR] 境界線→文字へ再分類:', reclassified, '件 / 実テキスト採用候補:', adoptedBoxes.size, '件');
 
-          // 二段階検証: 採用候補を元画像(procCanvas)から高倍率で切り出し直し、
-          // 単独クロップに対して再度OCRを実行する。1回目(ページ全体・
-          // 二値化画像・SPARSE_TEXT)と2回目(候補領域のみ・原寸カラー/グレー・
-          // 拡大・SINGLE_LINE)で読み取り条件が異なるため、両方が完全一致した
-          // 場合のみ実テキストとして確定する。片方だけの誤読では一致しにくく
-          // なるため、"7"の上線かすれ等の見落としを減らせる。
+          // 二段階検証: 採用候補をPDF自体から候補領域だけ直接再レンダリング
+          // し、単独クロップに対して再度OCRを実行する。実データ検証の結果、
+          // Tesseract.jsはこの文書では高DPI(1200等)だとむしろ誤読・未検出が
+          // 増え、150dpi前後で最も安定して読めることが分かったため、
+          // VERIFY_DPIもOCR_SCAN_DPISと同様に低め〜中程度の固定値にする
+          // （「解像度を上げるほど精度が上がる」という前提が誤りだった）。
+          // 1回目(帯・SPARSE_TEXT)と2回目(候補領域のみ・SINGLE_LINE)で
+          // 読み取り条件が異なるため、両方が完全一致した場合のみ実テキストと
+          // して確定する。片方だけの誤読では一致しにくくなるため、"7"の上線
+          // かすれ等の見落としを減らせる。
           if (adoptedBoxes.size > 0) {
-            setStatus('OCR結果を高倍率で再確認中…', 'run'); await tick();
+            setStatus('OCR結果を再確認中…', 'run'); await tick();
+            const VERIFY_DPI = 150;
+            const PAD_VERIFY_PX = 15; // VERIFY_DPI空間でのクロップ余白(px)
             const verifyWorker = await Tesseract.createWorker('eng', 1, {});
             try {
               await verifyWorker.setParameters({
@@ -863,23 +1036,14 @@ async function processDocument() {
               });
               for (const b of [...adoptedBoxes]) {
                 try {
-                  const PAD = 4, SCALE = 4;
-                  const x0 = Math.max(0, Math.floor(b.pxBbox.x0) - PAD);
-                  const y0 = Math.max(0, Math.floor(b.pxBbox.y0) - PAD);
-                  const x1 = Math.min(procCanvas.width,  Math.ceil(b.pxBbox.x1) + PAD);
-                  const y1 = Math.min(procCanvas.height, Math.ceil(b.pxBbox.y1) + PAD);
-                  const cw = x1 - x0, ch = y1 - y0;
-                  if (cw <= 0 || ch <= 0) { adoptedBoxes.delete(b); continue; }
-
-                  const cropCanvas = document.createElement('canvas');
-                  cropCanvas.width = cw * SCALE; cropCanvas.height = ch * SCALE;
-                  const cctx = cropCanvas.getContext('2d');
-                  cctx.imageSmoothingEnabled = true;
-                  cctx.imageSmoothingQuality = 'high';
-                  // 元画像(procCanvas)は二値化前のグレースケール描画そのもの。
-                  // 1回目は二値化画像を使ったが、ここでは意図的に生画像を使い、
-                  // 二値化しきい値の取り方自体が原因の誤読を切り分けられるようにする。
-                  cctx.drawImage(procCanvas, x0, y0, cw, ch, 0, 0, cw * SCALE, ch * SCALE);
+                  const bb = b.pxBboxFull;
+                  const toVerifyPx = VERIFY_DPI / b.srcDpi;
+                  const vx0 = bb.x0 * toVerifyPx - PAD_VERIFY_PX;
+                  const vy0 = bb.y0 * toVerifyPx - PAD_VERIFY_PX;
+                  const vx1 = bb.x1 * toVerifyPx + PAD_VERIFY_PX;
+                  const vy1 = bb.y1 * toVerifyPx + PAD_VERIFY_PX;
+                  const { canvas: cropCanvas } = await renderPdfRegion(pageNum, VERIFY_DPI, vx0, vy0, vx1, vy1);
+                  if (cropCanvas.width <= 1 || cropCanvas.height <= 1) { adoptedBoxes.delete(b); continue; }
 
                   const { data } = await verifyWorker.recognize(cropCanvas);
                   const reread = (data.text || '').trim().replace(/\s+/g, '');
@@ -931,13 +1095,10 @@ async function processDocument() {
         }
       }
 
-      // 方角記号(コンパスマーク)の自動検出・自動描画は撤回した。
-      // 「左上の固定領域内を方角レイヤへ振り替える」方式は実際の境界線を
-      // 巻き込み、「常に固定位置へ北矢印を描画する」方式も、別PDFで実測した
-      // ところ方角記号の位置・向きが文書によって異なる（道路沿いに斜めに
-      // 配置される等）ことが判明し、一般化できないことが分かった。
-      // → 方角記号は他の境界線と同様、境界線レイヤ(黄)のまま出力する。
-    }
+    // 方角記号(コンパスマーク)の自動検出は、文書によって位置・向き・サイズが
+    // 異なり一般化できないため撤回済み（過去の実測で誤検出が多発）。
+    // 手動範囲指定（プレビュー上でのドラッグ操作）も、変換実行1アクションで
+    // 完結しない運用になるため見送り、未実装のまま据え置く。
 
     setProgress(85);
 
@@ -1039,8 +1200,8 @@ function classifyVectorFeatures(features, scaleDenom) {
   // 印字文字は紙面上で数mm程度という想定のもと、実世界mmでの閾値も
   // scaleDenomに比例させる（例: 1/500で紙面3mmの文字 → 実世界1500mm）。
   const TEXT_DIAG_MAX_MM      = 3.0  * scaleDenom;  // 文字ストローク1本相当（紙面3mm換算）
-  const DIRECTION_DIAG_MAX_MM = 15.0 * scaleDenom;  // 方角記号(コンパス)はやや大きめ（紙面15mm換算）
-  const CORNER_RATIO = 0.18; // ページ四隅からこの比率以内を「隅」とみなす
+  const DIRECTION_DIAG_MAX_MM = 20.0 * scaleDenom;  // 方角記号(コンパス)はやや大きめ（紙面20mm換算。文書により図形サイズが変わるため少し広めに）
+  const CORNER_RATIO = 0.25; // ページ四隅からこの比率以内を「隅」とみなす（やや広め。方角記号が完全な四隅でなく少し内側に配置される文書もあるため）
 
   features.forEach((feat, i) => {
     if (feat.properties.layerType) return; // 既に分類済みのものはそのまま
@@ -1802,7 +1963,7 @@ function drawTextLabels(ctx, textFeatures, imgW, imgH, scaleDenom, dpi) {
 // ② 地番文字(text): 直線度が低い小チェーン
 // ③ 境界線(border): それ以外のコンテンツ
 // =====================================================================
-function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = false) {
+function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = false, topFrac = 0.07, botFrac = 0.27) {
   // ── 1. グレースケール
   let gray = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++)
@@ -1824,11 +1985,12 @@ function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = 
     for (let i = 0; i < W * H; i++) bin[i] = gray[i] < thresh ? 1 : 0;
   }
 
-  // ── 3. 公図最適化: ヘッダー(上7%)・テーブル(下27%)をマスク
+  // ── 3. 公図最適化: ヘッダー(上topFrac)・テーブル(下botFrac)をマスク
+  //    既定値(7%/27%)はUIの「上部除外％」「下部除外％」から可変。
   let activeStart = 0, activeEnd = H;
   if (kouzuOpt) {
-    activeStart = Math.round(H * 0.07);
-    activeEnd   = Math.round(H * 0.73);
+    activeStart = Math.round(H * topFrac);
+    activeEnd   = Math.round(H * (1 - botFrac));
     for (let i = 0; i < activeStart * W; i++) bin[i] = 0;
     for (let i = activeEnd * W; i < W * H; i++) bin[i] = 0;
     console.log('[公図最適化] y=0〜' + activeStart + ' / y=' + activeEnd + '〜' + H + ' をマスク');
