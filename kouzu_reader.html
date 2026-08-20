@@ -268,6 +268,7 @@
         <div class="hint">公図に記載の縮尺を選択してください。DXF・JWCの座標が実寸mm（実世界）に変換されます。</div>
         <div id="scaleCheckPanel" style="display:none;margin-top:8px;padding:7px;background:#10172d;border:1px solid #e0a800;border-radius:5px">
           <div style="font-size:11px;color:#ffd966;font-weight:bold;margin-bottom:5px">① 下の画像で「出力縮尺」を確認</div>
+          <div id="scaleDetectResult" style="font-size:11px;color:#aaa;margin-bottom:5px">縮尺を自動検出します…</div>
           <div style="background:white;overflow:auto;max-height:190px;border-radius:3px">
             <canvas id="scaleCheckCanvas" style="display:block;width:100%;height:auto"></canvas>
           </div>
@@ -628,6 +629,63 @@ async function renderScaleCheck(pageNum) {
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, out.width, out.height);
   ctx.drawImage(full, 0, cropY, full.width, cropH, 0, 0, out.width, cropH);
+  await detectScaleFromCanvas(out);
+}
+
+// ページ下部に焼き込まれた「1/500」「1/1000」等をOCRで検出する。
+// 候補が一意の場合だけ自動採用し、曖昧な場合は手動確認を残す。
+async function detectScaleFromCanvas(canvas) {
+  const result = document.getElementById('scaleDetectResult');
+  result.textContent = '縮尺を自動検出中…';
+  result.style.color = '#aaa';
+  resetScaleConfirmation();
+
+  if (typeof Tesseract === 'undefined') {
+    result.textContent = '自動検出を利用できません。画像を見て手動選択してください。';
+    result.style.color = '#ffb3b3';
+    return;
+  }
+
+  const worker = await Tesseract.createWorker('eng', 1, {});
+  try {
+    await worker.setParameters({
+      tessedit_char_whitelist: '0123456789/:',
+      tessedit_pageseg_mode: (Tesseract.PSM && Tesseract.PSM.SPARSE_TEXT) || '11',
+    });
+    const { data } = await worker.recognize(canvas);
+    const text = String(data.text || '').replace(/\s+/g, ' ');
+    const allowed = new Set(['100','200','250','300','500','600','1000','2500']);
+    const found = new Set();
+    // 「1/500」のほか、罫線で先頭の1が欠けて「/500」と読まれる例にも対応。
+    for (const m of text.matchAll(/(?:1\s*)?[\/:]\s*(\d{3,4})/g)) {
+      if (allowed.has(m[1])) found.add(m[1]);
+    }
+
+    if (found.size === 1) {
+      const detected = [...found][0];
+      const select = document.getElementById('cadScale');
+      select.value = detected;
+      const dpi = parseInt(document.getElementById('dpi').value);
+      document.getElementById('mmPerPxCalc').textContent = (25.4 / dpi * parseInt(detected)).toFixed(1);
+      document.getElementById('scaleConfirmed').checked = true;
+      document.getElementById('processBtn').disabled = false;
+      result.textContent = `✓ 自動検出: 1:${detected}（この縮尺でDXF・JWCを出力します）`;
+      result.style.color = '#7ee787';
+      setStatus(`縮尺 1:${detected} を自動検出しました → 変換できます`, 'ok');
+    } else if (found.size > 1) {
+      result.textContent = `候補が複数あります（${[...found].map(v => '1:' + v).join('、')}）。画像を見て選択してください。`;
+      result.style.color = '#ffd966';
+    } else {
+      result.textContent = '縮尺を自動検出できませんでした。画像を見て手動選択してください。';
+      result.style.color = '#ffb3b3';
+    }
+  } catch (e) {
+    console.warn('[縮尺OCR]', e);
+    result.textContent = '縮尺の自動検出に失敗しました。画像を見て手動選択してください。';
+    result.style.color = '#ffb3b3';
+  } finally {
+    await worker.terminate();
+  }
 }
 
 document.getElementById('pageSelect').addEventListener('change', async function() {
@@ -1582,8 +1640,11 @@ function geojsonToJWC(geojson, scaleDenom, dpi) {
     return [841, 594];
   }
   const drawW = maxX - minX, drawH = maxY - minY;
-  const [paperW, paperH] = paperSizeMm(drawW, drawH);
-  // 用紙中央に来るよう平行移動（図面の中心 → 用紙の中心）
+  // 図形座標は実寸mmなので、用紙判定は検出縮尺で紙面mmへ戻して行う。
+  const paperDrawW = drawW / scaleDenom, paperDrawH = drawH / scaleDenom;
+  const [paperWmm, paperHmm] = paperSizeMm(paperDrawW, paperDrawH);
+  // JWC座標系の用紙寸法も実寸mm（紙面mm×縮尺）として中央配置する。
+  const paperW = paperWmm * scaleDenom, paperH = paperHmm * scaleDenom;
   const offX = paperW / 2 - (minX + drawW / 2);
   const offY = paperH / 2 - (minY + drawH / 2);
   function toPaper([mx, my]) { return [+(mx + offX).toFixed(3), +(my + offY).toFixed(3)]; }
@@ -1591,12 +1652,11 @@ function geojsonToJWC(geojson, scaleDenom, dpi) {
   const L = [];
   L.push('# Jw_cad Data');
   L.push('HST');
-  L.push('P' + paperCode(drawW, drawH));
-  // データは実世界mmで出力しているため、S=1/1（実寸そのまま）で統一する。
-  // JW_CAD側の縮尺設定に「500倍する」計算を一切依存させないための方針。
-  // 印刷時に1/500で出したい場合は、印刷ダイアログの印字倍率側で指定する。
-  L.push('S 1');
-  const groupScales = Array(16).fill(1);
+  L.push('P' + paperCode(paperDrawW, paperDrawH));
+  // 座標は実寸mmのまま、Jw_cadの図面縮尺と全レイヤグループ縮尺に
+  // OCR検出値を設定する。測定距離と表示縮尺の両方を一致させる。
+  L.push('S ' + scaleDenom);
+  const groupScales = Array(16).fill(scaleDenom);
   L.push('hs ' + groupScales.join(' '));
   L.push('ST 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
   L.push('L 0 2 0');  // レイヤ0 黄（境界線）
