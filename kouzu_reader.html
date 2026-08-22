@@ -1421,7 +1421,12 @@ async function processDocument() {
           if (adoptedBoxes.size > 0) {
             setStatus('OCR結果を再確認中…', 'run'); await tick();
             const VERIFY_DPI = 150;
-            const PAD_VERIFY_PX = 15; // VERIFY_DPI空間でのクロップ余白(px)
+            // VERIFY_DPI空間でのクロップ余白(px)。15px(≒2.5mm)だと地番文字1個分
+            // 近くの余白になり、密集区画で隣接文字が入り込んで結合誤読され
+            // （例:"1599-4"→"1599-41599-1"）二段階検証が不一致判定になるケースが
+            // 実データで多数確認できたため6px(≒1mm)へ縮小し、正しく読めていた
+            // 語まで巻き添えで不採用になるのを減らす。
+            const PAD_VERIFY_PX = 6;
             try {
               const verifyOcr = await getPaddleOcrEngine();
               for (const b of [...adoptedBoxes]) {
@@ -1462,7 +1467,24 @@ async function processDocument() {
               const { domBox, domRatio } = dominantBox(lenByBox, total);
               return !(domBox && adoptedBoxes.has(domBox) && domRatio >= DOM_RATIO_THRESHOLD);
             });
+
+            // fontSize外れ値ガード: OCR検出bbox高さは低DPIパス(OCR_SCAN_DPIS内の
+            // 120/150dpi)ほどpx量子化誤差がmm換算で拡大される（例: 120dpi・縮尺
+            // 1/1000では1pxの誤差が211mmに達する）。同じページ内でも一部の語だけ
+            // 検出boxが実際の文字より大きくずれ、fontSizeが数倍〜数十倍に膨らむ
+            // 実測不具合があったため、ページ内の中央値から大きく外れる高さは
+            // 中央値近辺にクランプする（表示位置には影響させない）。
+            const rawHeights = [...adoptedBoxes].map(b => b.rawMaxY - b.rawMinY).filter(h => h > 0).sort((a, b) => a - b);
+            const medianH = rawHeights.length ? rawHeights[Math.floor(rawHeights.length / 2)] : 0;
+            const MAX_HEIGHT_RATIO = 2.0; // 中央値の2倍を超える高さは異常値とみなす
+            let clampedCount = 0;
+
             for (const b of adoptedBoxes) {
+              let h = b.rawMaxY - b.rawMinY;
+              if (medianH > 0 && h > medianH * MAX_HEIGHT_RATIO) {
+                clampedCount++;
+                h = medianH * MAX_HEIGHT_RATIO;
+              }
               textFeatures.push({
                 type: 'Feature',
                 // 挿入点は左下基準（DXF/JWCのTEXTは水平・垂直位置指定なしのため
@@ -1471,13 +1493,14 @@ async function processDocument() {
                 geometry: { type: 'Point', coordinates: [b.rawMinX, b.rawMinY] },
                 properties: {
                   text: b.text,
-                  fontSize: +((b.rawMaxY - b.rawMinY) * 0.9).toFixed(3),
+                  fontSize: +(h * 0.9).toFixed(3),
                   layerType: 'label',
                   source: 'ocr',
                   confidence: b.confidence,
                 }
               });
             }
+            if (clampedCount > 0) console.log('[OCR] fontSize外れ値をクランプ:', clampedCount, '件 / 中央値高さ(mm):', medianH.toFixed(2));
             console.log('[OCR] 実テキストとして採用（要目視確認）:', adoptedBoxes.size, '件', [...adoptedBoxes].map(b => `${b.text}(${b.confidence.toFixed(0)})`));
           }
         } catch (e) {
@@ -1621,14 +1644,25 @@ function drawContours(ctx, features, imgW, imgH, scaleDenom, dpi) {
   const COLOR_BY_LAYER = { text: '#7CFC00', direction: '#3FA9F5' };
   const DEFAULT_COLOR  = '#e94560';
   ctx.save();
-  ctx.lineWidth   = 1.2;
-  ctx.globalAlpha = 0.85;
   features.forEach(feat => {
     const pts = feat.geometry.type === 'LineString'
       ? feat.geometry.coordinates
       : feat.geometry.coordinates[0];
     if (!pts || pts.length < 2) return;
-    ctx.strokeStyle = COLOR_BY_LAYER[feat.properties.layerType] || DEFAULT_COLOR;
+    const lt = feat.properties.layerType;
+    // 'text'はOCRで実テキスト化できなかった「未確定」の文字らしき輪郭。
+    // 密集した区画では輪郭同士が重なり合って判読不能に潰れて見えるとの
+    // 指摘があったため、確定済みレイヤ(境界線・外枠・方角)より控えめな
+    // 線幅・不透明度で描き、視覚的なノイズを抑える（存在自体は分かるように
+    // 残す。使い方.mdの「文字らしき輪郭として色分けする」設計は維持）。
+    if (lt === 'text') {
+      ctx.lineWidth   = 0.6;
+      ctx.globalAlpha = 0.35;
+    } else {
+      ctx.lineWidth   = 1.2;
+      ctx.globalAlpha = 0.85;
+    }
+    ctx.strokeStyle = COLOR_BY_LAYER[lt] || DEFAULT_COLOR;
     const [sx, sy] = mmToPx(pts[0]);
     ctx.beginPath();
     ctx.moveTo(sx, sy);
@@ -2300,12 +2334,19 @@ function getPaddleOcrEngine() {
     if (!window.__PaddleOCR) {
       return Promise.reject(new Error('PaddleOCR.jsが読み込まれていません'));
     }
+    // wasmPathsは意図的に指定しない。PaddleOCR.js@0.4.2の+esmビルドは内部で
+    // 固定バージョンのonnxruntime-webを動的import(https://cdn.jsdelivr.net/npm/
+    // onnxruntime-web@<X>/+esm)しており、そのバージョンはpackage.jsonの依存範囲
+    // (^1.22.0)からjsDelivrがビルド時に解決した値（例: 1.26.0）になる。ここで
+    // wasmPathsに別バージョン(1.22.0)を決め打ちすると、JS側(1.26.0)とWASMバイナリ側
+    // (1.22.0)のバージョンが食い違い、ort側で「Session mismatch」エラーが発生し
+    // OCRが完全に失敗する不具合があった。wasmPathsを省略しort自身のデフォルト解決に
+    // 任せることで、JS側と同一バージョンのWASMが使われるようにする。
     __paddleOcrEnginePromise = window.__PaddleOCR.create({
       lang: 'ch',
       ocrVersion: 'PP-OCRv6',
       ortOptions: {
         backend: 'wasm',
-        wasmPaths: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/',
       },
     }).catch(e => { __paddleOcrEnginePromise = null; throw e; });
   }
