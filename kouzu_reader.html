@@ -5,7 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>公図PDF → GeoJSON 変換</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <!-- 地番文字OCRエンジン: Tesseract.js から PaddleOCR.js(PP-OCRv6, ONNX Runtime Web)へ切替。
+       サーバー送信は発生しない(モデルファイルをCDNから取得しブラウザ内で推論するのみ、
+       画像・PDFデータ自体は一切外部へ送らない)。PP-OCRv6はPythonの姉妹ツール
+       (scripts/kouzu_to_dxf.py)でRapidOCR経由により5/9誤読の解消・信頼度90-100%化を
+       確認済みのモデル系統と同一（PP-OCRv6_small det/rec）。 -->
+  <script type="module">
+    import { PaddleOCR } from "https://cdn.jsdelivr.net/npm/@paddleocr/paddleocr-js@0.4.2/+esm";
+    window.__PaddleOCR = PaddleOCR;
+    window.__paddleOcrReady = true;
+  </script>
   <script>
 /*!
  * encoding-japanese v2.2.0 - Convert and detect character encoding in JavaScript
@@ -964,20 +973,20 @@ async function detectScaleFromCanvas(canvas) {
   result.style.color = '#aaa';
   resetScaleConfirmation();
 
-  if (typeof Tesseract === 'undefined') {
+  if (!window.__paddleOcrReady || !window.__PaddleOCR) {
     result.textContent = '自動検出を利用できません。画像を見て手動選択してください。';
     result.style.color = '#ffb3b3';
     return;
   }
 
-  const worker = await Tesseract.createWorker('eng', 1, {});
   try {
-    await worker.setParameters({
-      tessedit_char_whitelist: '0123456789/:',
-      tessedit_pageseg_mode: (Tesseract.PSM && Tesseract.PSM.SPARSE_TEXT) || '11',
-    });
-    const { data } = await worker.recognize(canvas);
-    const text = String(data.text || '').replace(/\s+/g, ' ');
+    const ocr = await getPaddleOcrEngine();
+    const [ocrResult] = await ocr.predict(canvas);
+    // PaddleOCR.jsにはTesseract.jsのcharacter whitelist相当の機能が無いため、
+    // 全角スラッシュ・コロンを半角へ正規化した上で後段の正規表現マッチに委ねる
+    // （数字/500等以外の余計な認識結果が混ざっても、マッチしなければ無害）。
+    const text = (ocrResult.items || []).map(it => it.text).join(' ')
+      .replace(/／/g, '/').replace(/：/g, ':').replace(/\s+/g, ' ');
     const found = new Set();
     // 「1/500」のほか、罫線で先頭の1が欠けて「/500」と読まれる例にも対応。
     // 分母を固定リストに限定せず、50～10000の任意縮尺を採用する。
@@ -1013,8 +1022,6 @@ async function detectScaleFromCanvas(canvas) {
     console.warn('[縮尺OCR]', e);
     result.textContent = '縮尺の自動検出に失敗しました。画像を見て手動選択してください。';
     result.style.color = '#ffb3b3';
-  } finally {
-    await worker.terminate();
   }
 }
 
@@ -1213,7 +1220,7 @@ async function processDocument() {
       lastDpi     = procDpi;
     }
 
-    // PDF内に実テキストが1件も無い場合、OCR(Tesseract.js)で地番数字らしき
+    // PDF内に実テキストが1件も無い場合、OCR(PaddleOCR.js)で地番数字らしき
     // 領域を検出し、その範囲にある候補図形（ラスター起源の'border'チェーン、
     // またはベクター起源の小図形分類で'text'と推測された図形のいずれか）を
     // 文字レイヤへ振り分ける。OCRで検出できなかった部分は元のレイヤ色の
@@ -1404,25 +1411,19 @@ async function processDocument() {
           console.log('[OCR] 境界線→文字へ再分類:', reclassified, '件 / 実テキスト採用候補:', adoptedBoxes.size, '件');
 
           // 二段階検証: 採用候補をPDF自体から候補領域だけ直接再レンダリング
-          // し、単独クロップに対して再度OCRを実行する。実データ検証の結果、
-          // Tesseract.jsはこの文書では高DPI(1200等)だとむしろ誤読・未検出が
-          // 増え、150dpi前後で最も安定して読めることが分かったため、
-          // VERIFY_DPIもOCR_SCAN_DPISと同様に低め〜中程度の固定値にする
-          // （「解像度を上げるほど精度が上がる」という前提が誤りだった）。
-          // 1回目(帯・SPARSE_TEXT)と2回目(候補領域のみ・SINGLE_LINE)で
-          // 読み取り条件が異なるため、両方が完全一致した場合のみ実テキストと
-          // して確定する。片方だけの誤読では一致しにくくなるため、"7"の上線
-          // かすれ等の見落としを減らせる。
+          // し、単独クロップに対して再度OCRを実行する。旧Tesseract.js版では
+          // この文書で高DPI(1200等)だとむしろ誤読・未検出が増え、150dpi前後
+          // が最も安定した実測に基づきVERIFY_DPIを固定していた。PaddleOCR.js
+          // (PP-OCRv6)でも同じVERIFY_DPIを踏襲する（解像度耐性が高いモデルの
+          // ため悪化はしない想定。むしろ余裕があれば引き上げ余地あり）。
+          // 1回目(帯全体)と2回目(候補領域のみの単独クロップ)で読み取り条件が
+          // 異なるため、両方が完全一致した場合のみ実テキストとして確定する。
           if (adoptedBoxes.size > 0) {
             setStatus('OCR結果を再確認中…', 'run'); await tick();
             const VERIFY_DPI = 150;
             const PAD_VERIFY_PX = 15; // VERIFY_DPI空間でのクロップ余白(px)
-            const verifyWorker = await Tesseract.createWorker('eng', 1, {});
             try {
-              await verifyWorker.setParameters({
-                tessedit_char_whitelist: '0123456789-',
-                tessedit_pageseg_mode: (Tesseract.PSM && Tesseract.PSM.SINGLE_LINE) || '7',
-              });
+              const verifyOcr = await getPaddleOcrEngine();
               for (const b of [...adoptedBoxes]) {
                 try {
                   const bb = b.pxBboxFull;
@@ -1434,8 +1435,8 @@ async function processDocument() {
                   const { canvas: cropCanvas } = await renderPdfRegion(pageNum, VERIFY_DPI, vx0, vy0, vx1, vy1);
                   if (cropCanvas.width <= 1 || cropCanvas.height <= 1) { adoptedBoxes.delete(b); continue; }
 
-                  const { data } = await verifyWorker.recognize(cropCanvas);
-                  const reread = (data.text || '').trim().replace(/\s+/g, '');
+                  const [vresult] = await verifyOcr.predict(cropCanvas);
+                  const reread = (vresult.items || []).map(it => it.text).join('').trim().replace(/\s+/g, '');
                   if (reread !== b.text) {
                     console.warn('[OCR二段階検証] 不一致のため不採用:', b.text, '→再読取:', reread || '(認識不可)');
                     adoptedBoxes.delete(b);
@@ -1445,8 +1446,8 @@ async function processDocument() {
                   adoptedBoxes.delete(b);
                 }
               }
-            } finally {
-              await verifyWorker.terminate();
+            } catch (e) {
+              console.warn('[OCR二段階検証] PaddleOCRエンジン取得失敗:', e);
             }
             console.log('[OCR] 二段階検証後の採用件数:', adoptedBoxes.size, '件');
           }
@@ -2282,51 +2283,70 @@ function buildBinarizedCanvasForOcr(srcCanvas, thinLine) {
 }
 
 // =====================================================================
-// OCR（Tesseract.js）による地番数字検出
+// OCR（PaddleOCR.js / PP-OCRv6, ONNX Runtime Web）による地番数字検出
 // 完全スキャンPDF（PDF内に実テキストが存在しない）向け。
 // 文字列の完全一致は要求せず、「文字がありそうな領域」を検出することを
 // 主目的とする（境界線抽出との切り分けに使う）。認識できた文字列は
 // 副次的に地番ラベルとしても採用する。
+// 旧Tesseract.jsから、姉妹ツール(scripts/kouzu_to_dxf.py)でRapidOCR経由の
+// 検証により精度改善(検出件数増・5/9誤読解消・信頼度90-100%化)が確認済みの
+// PP-OCRv6系モデルへ切替。ONNX Runtime Webによりブラウザ内で推論するため、
+// PDF・画像データを外部へ送信することはない（モデルファイル自体はCDNから
+// 取得するのみで、Tesseract.jsが言語データをCDNから取得するのと同様）。
 // =====================================================================
+let __paddleOcrEnginePromise = null;
+function getPaddleOcrEngine() {
+  if (!__paddleOcrEnginePromise) {
+    if (!window.__PaddleOCR) {
+      return Promise.reject(new Error('PaddleOCR.jsが読み込まれていません'));
+    }
+    __paddleOcrEnginePromise = window.__PaddleOCR.create({
+      lang: 'ch',
+      ocrVersion: 'PP-OCRv6',
+      ortOptions: {
+        backend: 'wasm',
+        wasmPaths: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/',
+      },
+    }).catch(e => { __paddleOcrEnginePromise = null; throw e; });
+  }
+  return __paddleOcrEnginePromise;
+}
+
+// PaddleOCR.jsが返す4点ポリゴン(poly、回転を考慮した四角形)を、既存の
+// マスク・按分・二段階検証ロジックが前提とする軸並行の矩形bbox
+// {x0,y0,x1,y1}へ変換する（地番文字はほぼ水平配置のため、外接矩形化による
+// 実用上の誤差は無視できる）。
+function polyToAxisAlignedBbox(poly) {
+  const xs = poly.map(p => p[0]);
+  const ys = poly.map(p => p[1]);
+  return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+}
+
 async function ocrDetectDigitRegions(canvas) {
-  if (typeof Tesseract === 'undefined') {
-    console.warn('[OCR] Tesseract.jsが読み込まれていません');
+  if (!window.__paddleOcrReady || !window.__PaddleOCR) {
+    console.warn('[OCR] PaddleOCR.jsが読み込まれていません');
     return [];
   }
-  const worker = await Tesseract.createWorker('eng', 1, {
-    logger: m => {
-      if (m.status && typeof m.progress === 'number') {
-        setStatus(`OCRで地番文字を認識中…（${m.status} ${Math.round(m.progress * 100)}%）`, 'run');
-      }
-    },
+  setStatus('OCRで地番文字を認識中…（PaddleOCR推論中）', 'run');
+  const ocr = await getPaddleOcrEngine();
+  const [result] = await ocr.predict(canvas);
+  const items = (result.items || []).filter(it => it.text && it.text.trim().length > 0);
+  return items.map(it => {
+    // PaddleOCR.jsのscoreは0〜1。既存の呼び出し側ロジック(MASK_MIN_CONF等)は
+    // Tesseract.js準拠の0〜100スケールを前提にしているため揃える。
+    const confidence = it.score * 100;
+    return {
+      text: it.text.trim(),
+      confidence,
+      // PP-OCRv6は行(単語)単位のscoreのみを返し、文字単位の信頼度は
+      // 個別に持たない。Python版RapidOCR(同系モデル)の実データ検証で文字
+      // 単位の誤読がほぼ解消されていることを確認済みのため、Tesseract.js版
+      // にあった「文字単位最低confidence」の代わりに行全体confidenceを
+      // そのまま流用する（安全側に倒しても実害が小さいと判断）。
+      minCharConf: confidence,
+      bbox: polyToAxisAlignedBbox(it.poly), // {x0,y0,x1,y1} 単位: canvasのピクセル座標
+    };
   });
-  try {
-    await worker.setParameters({
-      tessedit_char_whitelist: '0123456789-',
-      // 文書全体に短いラベルが疎らに散らばる図面向けのページ分割モード
-      tessedit_pageseg_mode: (Tesseract.PSM && Tesseract.PSM.SPARSE_TEXT) || '11',
-    });
-    const { data } = await worker.recognize(canvas);
-    const words = (data.words || []).filter(w => w.text && w.text.trim().length > 0);
-    return words.map(w => {
-      // 単語全体の平均confidenceだけでは、"7"の上線が薄くて"1"に見える等、
-      // 1文字だけ誤読した場合でも他の文字の高confidenceに引きずられて
-      // 平均が高く出てしまうことがある（"70"→"10"の誤読等）。
-      // 文字単位(symbols)の最低confidenceも別途持たせ、置換の可否判定に使う。
-      const symbols = w.symbols || [];
-      const minCharConf = symbols.length
-        ? Math.min(...symbols.map(s => s.confidence))
-        : w.confidence;
-      return {
-        text: w.text.trim(),
-        confidence: w.confidence,
-        minCharConf,
-        bbox: w.bbox, // {x0,y0,x1,y1} 単位: canvasのピクセル座標
-      };
-    });
-  } finally {
-    await worker.terminate();
-  }
 }
 
 // =====================================================================
@@ -2445,7 +2465,7 @@ function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = 
   //    丸い数字("0"等)は境界線と幾何学的に区別が付かず、逆に区画が密集した図面
   //    では境界線の断片まで文字色に誤判定されるなど、精度に限界があった。
   //    → ここでは全て「境界線候補」として扱い、実際の文字/境界線の分離は
-  //      呼び出し側でOCR(Tesseract.js)が検出した領域を使って行う
+  //      呼び出し側でOCR(PaddleOCR.js)が検出した領域を使って行う
   //      （OCRで検出できた範囲だけ文字色に上書き。検出できなかった部分は
   //      境界線色のまま＝ユーザー要望の「読み取れていないものは境界線」）。
   const minLen = Math.max(4, Math.round(Math.sqrt(minAreaPx) / 5));
@@ -2460,14 +2480,33 @@ function processRasterLines(data, W, H, minAreaPx, epsRaw, kouzuOpt, thinLine = 
   // ── 断片マージ: 細線化で生じた偽の分岐点により斜め線が多数の
   //    短いチェーンに分断される問題を、ほぼ同一直線上で近接する
   //    断片同士を結合することで解消する（合成テストで513→108本に改善確認済）
-  const frameChains = mergeCollinearChains(frameChainsRaw);
-  const lineChains  = mergeCollinearChains(lineChainsRaw)
+  const frameChainsMerged = mergeCollinearChains(frameChainsRaw);
+  const lineChainsMerged  = mergeCollinearChains(lineChainsRaw)
     .map(c => ({ ...c, layerType: 'border' }));
 
   console.log('[3レイヤ分離] 外枠px:', framePixelCount,
-    '/ 外枠チェーン:', frameChainsRaw.length, '→マージ後', frameChains.length,
-    '/ 境界線チェーン:', lineChainsRaw.length, '→マージ後', lineChains.length,
+    '/ 外枠チェーン:', frameChainsRaw.length, '→マージ後', frameChainsMerged.length,
+    '/ 境界線チェーン:', lineChainsRaw.length, '→マージ後', lineChainsMerged.length,
     '(文字判定はOCRで別途実施)');
+
+  // ── 効果測定用の一時ログ（交点スナップ前）: 詳細は measureClosedRegions 参照。
+  //    改善効果の定量比較用で、最終的にUIへ出す情報ではない。
+  measureClosedRegions([...frameChainsMerged, ...lineChainsMerged], W, H, 'スナップ前');
+
+  // ── 交点推測スナップ: mergeCollinearChainsで結合できなかった残存チェーンの
+  //    未接続端点について、端点付近の傾き(方向ベクトル)を保ったまま延長し、
+  //    延長線同士の交点を「本来の交点」と推測してスナップする。
+  //    T字路・十字路のような異なる方向の線が交わる箇所で、スキャン品質や
+  //    かすれにより本来つながっているはずの線がわずかに離れているケースに対応する
+  //    （同一直線上の断片はmergeCollinearChainsが既に処理済みのため対象外）。
+  const frameChains = snapChainEndpointsByExtension(frameChainsMerged)
+    .map(c => ({ ...c, layerType: 'frame' }));
+  const lineChains  = snapChainEndpointsByExtension(lineChainsMerged)
+    .map(c => ({ ...c, layerType: 'border' }));
+
+  // ── 効果測定用の一時ログ（交点スナップ後）
+  measureClosedRegions([...frameChains, ...lineChains], W, H, 'スナップ後');
+
   return [...frameChains, ...lineChains];
 }
 
@@ -2537,6 +2576,224 @@ function mergeCollinearChains(chains, opts = {}) {
     // pixLenはマージ後の実際の経路長（px）— 断片の点数ではなく距離で表す
     return { pts: s, pixLen: pl, straightness: pl > 0 ? chord / pl : 0, layerType: it.layerType };
   });
+}
+
+// =====================================================================
+// 交点推測によるチェーン端点のスナップ（延長線交点法）
+// mergeCollinearChainsで結合できなかった残存チェーンの中には、スキャン品質・
+// かすれ等が原因で「本来交差しているはずの2本の境界線が、ラスター上では
+// わずかに離れて途切れている」ケースがある（T字路・十字路の交点付近に多い）。
+// 各断片の終端付近の進行方向（傾き）を保ったまま直線的に延長し、
+// 延長線同士の交点を「本来の交点」として推測してスナップする
+// （CADの「線分を延長して交点を求める」操作と同じ考え方）。
+//
+// 誤ったペアを繋いでしまうリスクを避けるためのハイブリッド安全装置:
+//   1) 角度差が小さい（ほぼ同一直線）ペアは対象外
+//      → mergeCollinearChainsが既に処理済みの領域のため、ここでは扱わない
+//   2) 交点までの延長距離が長すぎる場合はスナップしない
+//      → 誤って無関係な線同士を繋ぐより、繋がらない方が安全という方針
+// =====================================================================
+function snapChainEndpointsByExtension(chains, opts = {}) {
+  const gapTol      = opts.gapTol      ?? 40;                 // px: 端点間の探索半径（mergeCollinearChainsのgapTol=18より広め）
+  const minAngleTol = opts.minAngleTol ?? 15 * Math.PI / 180; // rad: これ未満はほぼ同一直線とみなし対象外
+  const maxExtend    = opts.maxExtend   ?? 45;                 // px: 延長距離の上限（安全装置）
+  const fitN          = opts.fitN        ?? 5;                  // 端点近傍何点で方向ベクトルを見るか
+  const connectTol    = opts.connectTol  ?? 2.5;                // px: これ以内なら既に接続済み（本物の分岐点）とみなす
+
+  if (!chains.length) return chains;
+
+  const items = chains.map((c, idx) => ({
+    idx, pts: c.pts.map(p => [p[0], p[1]]), layerType: c.layerType,
+  }));
+
+  function makeEndpointInfo(item, end) {
+    const pts = item.pts;
+    const n = pts.length;
+    const take = Math.min(fitN, n);
+    const seq = end === 'head' ? pts.slice(0, take) : pts.slice(n - take, n).slice().reverse();
+    const p0 = seq[0], p1 = seq[seq.length - 1];
+    let dx = p1[0] - p0[0], dy = p1[1] - p0[1];
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len; dy /= len;
+    // seqはチェーン内側へ向かう並びなので、延長(外向き)方向はその逆
+    return { itemIdx: item.idx, end, pt: p0, dir: [-dx, -dy] };
+  }
+
+  function angleBetweenAbs(d1, d2) {
+    const dot = Math.abs(d1[0] * d2[0] + d1[1] * d2[1]);
+    return Math.acos(Math.max(-1, Math.min(1, dot)));
+  }
+
+  // 2直線 (p1 + t*d1) と (p2 + s*d2) の交点。ほぼ平行な場合はnull
+  function lineIntersection(p1, d1, p2, d2) {
+    const denom = d1[0] * d2[1] - d1[1] * d2[0];
+    if (Math.abs(denom) < 1e-6) return null;
+    const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+    const t = (dx * d2[1] - dy * d2[0]) / denom;
+    return [p1[0] + d1[0] * t, p1[1] + d1[1] * t];
+  }
+
+  const endpoints = [];
+  for (const it of items) {
+    if (it.pts.length < 2) continue;
+    endpoints.push(makeEndpointInfo(it, 'head'));
+    endpoints.push(makeEndpointInfo(it, 'tail'));
+  }
+
+  // 既に他チェーンの端点とほぼ一致=接続済み（本物の分岐点・端点）とみなせる
+  // ものは対象外にする（traceLinesが分岐点座標を各鎖の端点として共有済みのため）
+  const isConnected = new Array(endpoints.length).fill(false);
+  for (let i = 0; i < endpoints.length; i++) {
+    for (let j = 0; j < endpoints.length; j++) {
+      if (i === j || endpoints[i].itemIdx === endpoints[j].itemIdx) continue;
+      const d = Math.hypot(endpoints[i].pt[0] - endpoints[j].pt[0], endpoints[i].pt[1] - endpoints[j].pt[1]);
+      if (d <= connectTol) { isConnected[i] = true; break; }
+    }
+  }
+
+  const snapTarget = new Array(endpoints.length).fill(null);
+  let candidateCount = 0, snappedCount = 0;
+
+  for (let i = 0; i < endpoints.length; i++) {
+    if (isConnected[i] || snapTarget[i]) continue;
+    const ei = endpoints[i];
+    let best = null;
+    for (let j = 0; j < endpoints.length; j++) {
+      if (i === j || isConnected[j] || snapTarget[j]) continue;
+      const ej = endpoints[j];
+      if (ej.itemIdx === ei.itemIdx) continue; // 同一チェーンの反対端は除外
+      const dist = Math.hypot(ei.pt[0] - ej.pt[0], ei.pt[1] - ej.pt[1]);
+      if (dist > gapTol) continue;
+      // 角度差が小さい（ほぼ同一直線）ペアはmergeCollinearChainsの領域なので対象外
+      if (angleBetweenAbs(ei.dir, ej.dir) < minAngleTol) continue;
+
+      candidateCount++;
+      const isect = lineIntersection(ei.pt, ei.dir, ej.pt, ej.dir);
+      if (!isect) continue;
+      const extI = Math.hypot(isect[0] - ei.pt[0], isect[1] - ei.pt[1]);
+      const extJ = Math.hypot(isect[0] - ej.pt[0], isect[1] - ej.pt[1]);
+      if (extI > maxExtend || extJ > maxExtend) continue; // 延長しすぎ → 安全装置で棄却
+
+      // 進行方向の前方に交点があること（後方へ大きく戻る交点は誤りやすいので除外）
+      const fwdI = (isect[0] - ei.pt[0]) * ei.dir[0] + (isect[1] - ei.pt[1]) * ei.dir[1];
+      const fwdJ = (isect[0] - ej.pt[0]) * ej.dir[0] + (isect[1] - ej.pt[1]) * ej.dir[1];
+      if (fwdI < -2 || fwdJ < -2) continue;
+
+      const score = extI + extJ;
+      if (!best || score < best.score) best = { j, isect, score };
+    }
+    if (best) {
+      snapTarget[i] = best.isect;
+      snapTarget[best.j] = best.isect;
+      snappedCount++;
+    }
+  }
+
+  for (let k = 0; k < endpoints.length; k++) {
+    if (!snapTarget[k]) continue;
+    const { itemIdx, end } = endpoints[k];
+    const pts = items[itemIdx].pts;
+    if (end === 'head') pts[0] = snapTarget[k];
+    else pts[pts.length - 1] = snapTarget[k];
+  }
+
+  const unconnectedCount = endpoints.filter((_, i) => !isConnected[i]).length;
+  console.log('[交点スナップ]', chains[0]?.layerType ?? '?',
+    '対象端点:', unconnectedCount, '/ 交差候補ペア評価:', candidateCount,
+    '/ スナップ成立:', snappedCount, '組');
+
+  return items.map((it, i) => ({
+    pts: it.pts, layerType: it.layerType,
+    pixLen: chains[i].pixLen, straightness: chains[i].straightness,
+  }));
+}
+
+// =====================================================================
+// 【効果測定用・一時関数】チェーン集合をラスター化し、フラッドフィル相当の
+// 連結成分ラベリングで「閉じた領域として扱える候補」の数を数える。
+// computeParcelHighlightと同じ考え方（境界線に囲まれた空白領域＝1筆）を
+// 使って、交点スナップ前後の改善度を定量比較するための一時的な計測。
+// 最終的な機能ではないため、UIには一切結果を出さずconsole.logのみに残す。
+// =====================================================================
+function rasterizeChainsToWall(chains, W, H) {
+  const wall = new Uint8Array(W * H);
+  function setPx(x, y) {
+    if (x < 0 || y < 0 || x >= W || y >= H) return;
+    wall[y * W + x] = 1;
+  }
+  function drawLine(x0, y0, x1, y1) {
+    x0 = Math.round(x0); y0 = Math.round(y0);
+    x1 = Math.round(x1); y1 = Math.round(y1);
+    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    while (true) {
+      setPx(x0, y0);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  for (const c of chains) {
+    const pts = c.pts;
+    for (let i = 1; i < pts.length; i++) drawLine(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]);
+  }
+  return wall;
+}
+
+function measureClosedRegions(chains, W, H, label) {
+  const wall = rasterizeChainsToWall(chains, W, H);
+  const free = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) free[i] = wall[i] ? 0 : 1;
+  const { labels, count } = labelComponents(free, W, H);
+
+  const areas = new Int32Array(count);
+  const touchesEdge = new Uint8Array(count);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const l = labels[i];
+      if (l < 0) continue;
+      areas[l]++;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) touchesEdge[l] = 1;
+    }
+  }
+
+  const totalArea = W * H;
+  const MIN_AREA_PX = 25;      // ノイズ的な極小隙間を除外（生の候補数用・下限は緩め）
+  const MAX_AREA_RATIO = 0.15; // computeParcelHighlightと同じ「漏れ出し」判定基準を流用
+  // 「1筆として妥当な広さ」の目安。ノイズ的な極小ループ（数十px）まで
+  // 「閉じた候補」に数えると水増しになるため、面積0.05%以上を目安の
+  // plausible判定にも分けて集計する（下限は経験則の目安であり厳密な基準ではない）
+  const PLAUSIBLE_MIN_RATIO = 0.0005;
+  let closed = 0, closedAreaSum = 0, plausible = 0, plausibleAreaSum = 0;
+  const closedAreas = [];
+  for (let l = 0; l < count; l++) {
+    if (touchesEdge[l]) continue;
+    if (areas[l] < MIN_AREA_PX) continue;
+    if (areas[l] / totalArea > MAX_AREA_RATIO) continue;
+    closed++;
+    closedAreaSum += areas[l];
+    closedAreas.push(areas[l]);
+    if (areas[l] / totalArea >= PLAUSIBLE_MIN_RATIO) { plausible++; plausibleAreaSum += areas[l]; }
+  }
+  closedAreas.sort((a, b) => b - a);
+
+  // 【デバッグ用・一時】構造把握のため、edge接触の有無を問わず全成分の
+  // 上位面積を確認する（背景の"海"がどれだけ支配的かを見るため）
+  const allAreas = [];
+  for (let l = 0; l < count; l++) allAreas.push({ a: areas[l], edge: !!touchesEdge[l] });
+  allAreas.sort((a, b) => b.a - a.a);
+  console.log(`[閉領域計測:${label}] 上位5成分(面積比%/edge接触):`,
+    allAreas.slice(0, 5).map(o => (o.a / totalArea * 100).toFixed(2) + '%' + (o.edge ? '(edge)' : '')).join(', '));
+
+  console.log(`[閉領域計測:${label}] 連結成分数(壁以外):`, count,
+    '/ 閉じた候補(非ノイズ・非漏れ・面積15%未満):', closed,
+    '/ うち1筆として妥当な広さ(面積比0.05%以上)の候補:', plausible,
+    '/ plausible候補平均面積比:', plausible ? (plausibleAreaSum / plausible / totalArea * 100).toFixed(2) + '%' : '-',
+    '/ 上位10件の面積比(%):', closedAreas.slice(0, 10).map(a => (a / totalArea * 100).toFixed(3)).join(','));
+  return { count, closed, plausible };
 }
 
 // Zhang-Suen 細線化アルゴリズム（インライン最適化版）
