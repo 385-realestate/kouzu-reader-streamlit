@@ -980,8 +980,7 @@ async function detectScaleFromCanvas(canvas) {
   }
 
   try {
-    const ocr = await getPaddleOcrEngine();
-    const [ocrResult] = await ocr.predict(canvas);
+    const [ocrResult] = await ocrPredictWithRetry(canvas);
     // PaddleOCR.jsにはTesseract.jsのcharacter whitelist相当の機能が無いため、
     // 全角スラッシュ・コロンを半角へ正規化した上で後段の正規表現マッチに委ねる
     // （数字/500等以外の余計な認識結果が混ざっても、マッチしなければ無害）。
@@ -1428,7 +1427,6 @@ async function processDocument() {
             // 語まで巻き添えで不採用になるのを減らす。
             const PAD_VERIFY_PX = 6;
             try {
-              const verifyOcr = await getPaddleOcrEngine();
               for (const b of [...adoptedBoxes]) {
                 try {
                   const bb = b.pxBboxFull;
@@ -1440,7 +1438,7 @@ async function processDocument() {
                   const { canvas: cropCanvas } = await renderPdfRegion(pageNum, VERIFY_DPI, vx0, vy0, vx1, vy1);
                   if (cropCanvas.width <= 1 || cropCanvas.height <= 1) { adoptedBoxes.delete(b); continue; }
 
-                  const [vresult] = await verifyOcr.predict(cropCanvas);
+                  const [vresult] = await ocrPredictWithRetry(cropCanvas);
                   const reread = (vresult.items || []).map(it => it.text).join('').trim().replace(/\s+/g, '');
                   if (reread !== b.text) {
                     console.warn('[OCR二段階検証] 不一致のため不採用:', b.text, '→再読取:', reread || '(認識不可)');
@@ -2334,23 +2332,63 @@ function getPaddleOcrEngine() {
     if (!window.__PaddleOCR) {
       return Promise.reject(new Error('PaddleOCR.jsが読み込まれていません'));
     }
-    // wasmPathsは意図的に指定しない。PaddleOCR.js@0.4.2の+esmビルドは内部で
-    // 固定バージョンのonnxruntime-webを動的import(https://cdn.jsdelivr.net/npm/
-    // onnxruntime-web@<X>/+esm)しており、そのバージョンはpackage.jsonの依存範囲
-    // (^1.22.0)からjsDelivrがビルド時に解決した値（例: 1.26.0）になる。ここで
-    // wasmPathsに別バージョン(1.22.0)を決め打ちすると、JS側(1.26.0)とWASMバイナリ側
-    // (1.22.0)のバージョンが食い違い、ort側で「Session mismatch」エラーが発生し
-    // OCRが完全に失敗する不具合があった。wasmPathsを省略しort自身のデフォルト解決に
-    // 任せることで、JS側と同一バージョンのWASMが使われるようにする。
+    // wasmPathsのバージョンを明示的に固定する。PaddleOCR.js@0.4.2の+esmビルドは
+    // 内部で固定バージョンのonnxruntime-webを動的import
+    // (https://cdn.jsdelivr.net/npm/onnxruntime-web@<X>/+esm)しており、現時点
+    // (2026-08時点でjsDelivrが返すビルド)ではX=1.26.0。
+    // 過去の経緯: 最初はwasmPathsに1.22.0を決め打ちしていたためJS側(1.26.0)と
+    // WASM側(1.22.0)が食い違い「Session mismatch」でOCRが完全に失敗した。
+    // その修正としてwasmPaths自体を省略し「ort自身のデフォルト解決に任せる」
+    // 方式に変えたが、それでも一部環境で同じ「Session mismatch」が
+    // predict()実行時に再現することを確認した。CDN(jsDelivr)の+esm経由で
+    // ロードされたonnxruntime-webは、import.meta.urlベースのWASMパス自動解決が
+    // 環境（マルチスレッドWorkerの初期化タイミング等）によって不安定になる
+    // ことが疑われるため、動的importされているのと同一のバージョンを
+    // wasmPathsとして明示指定し、自動解決の不確実性そのものを排除する。
+    // ライブラリを更新した場合は、jsDelivrの+esmバンドル内の
+    // `import("/npm/onnxruntime-web@X/+esm")` のXを確認し、この値も合わせて
+    // 更新すること（ズレるとまた同じ「Session mismatch」が再発する）。
     __paddleOcrEnginePromise = window.__PaddleOCR.create({
       lang: 'ch',
       ocrVersion: 'PP-OCRv6',
       ortOptions: {
         backend: 'wasm',
+        wasmPaths: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/',
       },
     }).catch(e => { __paddleOcrEnginePromise = null; throw e; });
   }
   return __paddleOcrEnginePromise;
+}
+
+// 実データ検証で「Session mismatch」「Session already started」エラーの
+// 根本原因は、同一のPaddleOCRエンジン(ONNX Runtime Web InferenceSession)に
+// 対して複数のpredict()呼び出しが並行実行されることだと判明した
+// （縮尺自動検出用OCRと地番文字認識用OCRが同じシングルトンエンジンを
+// 共有しているため、両者の呼び出しタイミングが重なると競合する。
+// InferenceSessionは同時に複数のrun()を安全に処理できる設計になっていない
+// 模様）。通常のUI操作では「変換実行」ボタンは縮尺自動検出の完了後にしか
+// 有効化されないため起こりにくいが、念のためアプリ側で確実に排他制御する。
+// __ocrQueueによってpredict()呼び出しを常に直列化し、さらに万一
+// エラーが起きた場合はエンジンを作り直して1回だけ自動リトライする
+// （ユーザーには「自動検出できませんでした」という誤った失敗表示を出さない）。
+let __ocrQueue = Promise.resolve();
+function ocrPredictWithRetry(canvas) {
+  const run = async () => {
+    try {
+      const ocr = await getPaddleOcrEngine();
+      return await ocr.predict(canvas);
+    } catch (e) {
+      console.warn('[OCR] 推論に失敗、エンジンを再作成して再試行します:', e);
+      __paddleOcrEnginePromise = null;
+      const ocr2 = await getPaddleOcrEngine();
+      return await ocr2.predict(canvas);
+    }
+  };
+  // 直前のOCRタスクの成功/失敗に関わらず、次のタスクは必ず実行されるように
+  // キューを繋ぐ（catchで握りつぶさないと、1回の失敗でキュー全体が停止する）。
+  const result = __ocrQueue.then(run, run);
+  __ocrQueue = result.then(() => {}, () => {});
+  return result;
 }
 
 // PaddleOCR.jsが返す4点ポリゴン(poly、回転を考慮した四角形)を、既存の
@@ -2369,8 +2407,7 @@ async function ocrDetectDigitRegions(canvas) {
     return [];
   }
   setStatus('OCRで地番文字を認識中…（PaddleOCR推論中）', 'run');
-  const ocr = await getPaddleOcrEngine();
-  const [result] = await ocr.predict(canvas);
+  const [result] = await ocrPredictWithRetry(canvas);
   const items = (result.items || []).filter(it => it.text && it.text.trim().length > 0);
   return items.map(it => {
     // PaddleOCR.jsのscoreは0〜1。既存の呼び出し側ロジック(MASK_MIN_CONF等)は
