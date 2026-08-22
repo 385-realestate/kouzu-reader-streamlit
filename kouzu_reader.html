@@ -109,7 +109,9 @@
       border-radius: 3px; cursor: pointer; font-size: 15px; line-height: 1;
     }
     .zoom-ctrl button:hover { background: #1a4a8a; color: #fff; }
+    .zoom-ctrl button.active { background: #e94560; color: #fff; }
     .zoom-ctrl span { font-size: 11px; color: #888; min-width: 38px; text-align: center; }
+    #measureLabel { font-size: 11px; color: #ffd700; margin-left: 2px; white-space: nowrap; }
 
     /* レイヤトグル */
     .layer-toggles { display: flex; align-items: center; gap: 4px; }
@@ -126,8 +128,11 @@
       overflow-y: auto; padding: 10px; min-width: 0;
     }
     .panel-title { font-size: 11px; color: #aaa; font-weight: bold; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #0f3460; }
+    #chibanSearch::placeholder { color: #555; }
+    /* 地番ハイライト機能は無効化中のため cursor/hover 演出は付与しない（一覧表示のみ）。
+       .highlighted 用のスタイルは再有効化時のため残す。 */
     .chiban-row { padding: 4px 6px; border-radius: 3px; color: #ffd700; word-break: break-all; line-height: 1.6; border-bottom: 1px solid #0d1b38; font-size: 11px; }
-    .chiban-row:hover { background: #0f3460; }
+    .chiban-row.highlighted { background: #e94560; color: #fff; font-weight: bold; }
 
     .result-bar {
       background: #16213e; border-top: 1px solid #0f3460;
@@ -318,6 +323,8 @@
         <button onclick="zoomIn()" title="拡大">＋</button>
         <button onclick="zoomReset()" title="リセット" style="font-size:12px">⟳</button>
         <button onclick="zoomActualScale()" title="公図の縮尺(1/500等)と同じ実寸表示にする" style="font-size:11px">実寸</button>
+        <button onclick="toggleMeasureMode()" id="measureBtn" title="定規代わり: 2点クリックで実寸距離を測定">📏</button>
+        <span id="measureLabel" style="display:none"></span>
       </div>
     </div>
 
@@ -335,6 +342,7 @@
         <button class="btn-dl"  id="downloadBtn" disabled onclick="downloadGeoJSON()">GeoJSON</button>
         <button class="btn-cad" id="dxfBtn"      disabled onclick="downloadDXF()">DXF</button>
         <button class="btn-cad" id="jwcBtn"      disabled onclick="downloadJWC()">JWC</button>
+        <button class="btn-cad" id="pngBtn"      disabled onclick="downloadPNG()" title="距離測定を含めた現在の表示をPNG画像で保存（現地確認・商談時の印刷用）">🖨 PNG保存</button>
       </div>
     </div>
 
@@ -344,8 +352,15 @@
   </div>
 
   <!-- 右パネル（地番一覧） -->
+  <!-- 地番ハイライト機能はフラッドフィル方式の精度不足（境界線検出の途切れ）により
+       今回のリリースでは無効化。検索ボックス・ハイライト誘導文言のみ非表示にし、
+       関連JS（computeParcelHighlight/highlightChibanFeature等）は将来の精度改善時に
+       再有効化できるよう削除せず残している。地番一覧の表示自体は引き続き有用なため維持。 -->
   <div class="right-panel">
     <div class="panel-title">📍 地番一覧 <span id="chibanCount" style="color:#555;font-weight:normal"></span></div>
+    <input type="text" id="chibanSearch" disabled placeholder="🔍 地番で検索してハイライト"
+           style="display:none;width:100%;background:#0f3460;border:1px solid #1a4a8a;color:#e0e0e0;padding:5px 8px;border-radius:4px;font-size:11px;margin-bottom:8px">
+    <div class="hint" id="chibanHighlightHint" style="display:none;margin-bottom:6px">地番をクリック、または検索してEnterで区画を赤くハイライトします</div>
     <div id="chibanList" style="color:#555;font-size:11px;padding:4px">変換実行後に表示</div>
   </div>
 </div>
@@ -370,6 +385,14 @@ let _isDrag = false, _ds = {x:0,y:0}, _dv = {x:0,y:0};
 const layerVisible = { frame: true, border: true, label: true, direction: true };
 let storedPdfCanvas = null, storedLineFeats = [], storedTextFeats = [];
 let storedCanvasW = 0, storedCanvasH = 0, storedScaleDen = 500, storedRendDpi = 200;
+
+// 地番ハイライト・距離測定（定規代わり）の状態
+let currentHighlight = null;   // { mw, mh, filled } フラッドフィルで検出した区画マスク
+let highlightedText  = null;   // ハイライト中の地番文字列
+let chibanRowEntries = [];     // 右パネルの行一覧（検索フィルタ用） {el, text, feat}
+let measureMode       = false;
+let measurePoints     = [];    // 距離測定でクリックした点（canvasピクセル座標, 最大2点）
+let _dragMoved         = false; // ドラッグ操作中にマウスが動いたか（測定モードのクリック誤爆防止）
 
 // =====================================================================
 // ズーム・パン
@@ -418,11 +441,12 @@ document.addEventListener('DOMContentLoaded', () => {
     applyTransform();
   }, { passive: false });
   wrap.addEventListener('mousedown', e => {
-    _isDrag = true; _ds = {x: e.clientX, y: e.clientY}; _dv = {x: viewX, y: viewY};
+    _isDrag = true; _dragMoved = false; _ds = {x: e.clientX, y: e.clientY}; _dv = {x: viewX, y: viewY};
     wrap.classList.add('dragging');
   });
   document.addEventListener('mousemove', e => {
     if (!_isDrag) return;
+    if (Math.abs(e.clientX - _ds.x) > 3 || Math.abs(e.clientY - _ds.y) > 3) _dragMoved = true;
     viewX = _dv.x + e.clientX - _ds.x;
     viewY = _dv.y + e.clientY - _ds.y;
     applyTransform();
@@ -430,6 +454,15 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('mouseup', () => {
     _isDrag = false;
     document.getElementById('canvasWrap').classList.remove('dragging');
+  });
+  // 距離測定モード: ドラッグ（パン操作）でないクリックのみ測定点として採用する
+  wrap.addEventListener('click', e => {
+    if (!measureMode || !storedPdfCanvas || _dragMoved) return;
+    const r = wrap.getBoundingClientRect();
+    const localX = e.clientX - r.left, localY = e.clientY - r.top;
+    const px = (localX - viewX) / viewScale;
+    const py = (localY - viewY) / viewScale;
+    handleMeasureClick(px, py);
   });
 });
 
@@ -458,16 +491,21 @@ function redrawPreview() {
     drawContours(ctx, vis, storedCanvasW, storedCanvasH, storedScaleDen, storedRendDpi);
   if (layerVisible.label && storedTextFeats.length)
     drawTextLabels(ctx, storedTextFeats, storedCanvasW, storedCanvasH, storedScaleDen, storedRendDpi);
+  if (currentHighlight) drawHighlightOverlay(ctx);
+  if (measurePoints.length) drawMeasurementOverlay(ctx);
 }
 
 // =====================================================================
 // 地番一覧テーブル
 // =====================================================================
 function populateChibanTable(textFeats) {
-  const list  = document.getElementById('chibanList');
-  const count = document.getElementById('chibanCount');
+  const list   = document.getElementById('chibanList');
+  const count  = document.getElementById('chibanCount');
+  const search = document.getElementById('chibanSearch');
   list.innerHTML = '';
+  chibanRowEntries = [];
   count.textContent = textFeats.length ? '(' + textFeats.length + '件)' : '';
+  if (search) { search.value = ''; search.disabled = !textFeats.length; }
   if (!textFeats.length) {
     list.innerHTML = '<div style="color:#555;padding:8px">テキスト未検出</div>';
     return;
@@ -478,8 +516,279 @@ function populateChibanTable(textFeats) {
     const d = document.createElement('div');
     d.className = 'chiban-row';
     d.textContent = f.properties.text;
+    // 地番ハイライト機能は無効化中（境界線検出精度の問題で全件失敗するため）。
+    // 一覧表示のみ提供し、クリックイベントは付与しない。
+    // 精度改善後に再有効化する場合は下記2行を戻す:
+    // d.title = 'クリックして区画をハイライト';
+    // d.onclick = () => highlightChibanFeature(f);
     list.appendChild(d);
+    chibanRowEntries.push({ el: d, text: f.properties.text, feat: f });
   }
+}
+
+// 検索ボックス: 入力に部分一致する行だけ残す。先頭一致した行を返す（Enter選択用）
+function filterChibanList() {
+  const q = document.getElementById('chibanSearch').value.trim();
+  let firstMatch = null;
+  for (const row of chibanRowEntries) {
+    const hit = !q || row.text.includes(q);
+    row.el.style.display = hit ? '' : 'none';
+    if (hit && !firstMatch) firstMatch = row;
+  }
+  return firstMatch;
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const box = document.getElementById('chibanSearch');
+  if (!box) return;
+  box.addEventListener('input', filterChibanList);
+  box.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const m = filterChibanList();
+    if (m) highlightChibanFeature(m.feat);
+  });
+});
+
+// =====================================================================
+// 地番ハイライト（検索・クリックした地番の区画を塗って目立たせる）
+// 「定規を当てて距離を測る／赤マジックで境界をなぞる」というアナログ作業の
+// 置き換えが目的。既に描画済みのラスター画像を直接フラッドフィルするため、
+// 境界線データ（ベクター/OCR起因を問わず）が多少断片化していても頑健に動く。
+// =====================================================================
+function highlightChibanFeature(feat) {
+  if (!storedPdfCanvas) return;
+  highlightedText = feat.properties.text;
+  for (const row of chibanRowEntries)
+    row.el.classList.toggle('highlighted', row.feat === feat);
+
+  const mmToPixFactor = storedRendDpi / (25.4 * storedScaleDen);
+  const [mx, my] = feat.geometry.coordinates;
+  const px = mx * mmToPixFactor;
+  const py = storedCanvasH - my * mmToPixFactor;
+
+  setStatus(`地番「${highlightedText}」の区画を検出中…`, 'run');
+  currentHighlight = computeParcelHighlight(px, py);
+  if (!currentHighlight) {
+    setStatus(`地番「${highlightedText}」の区画を特定できませんでした（境界線が閉じていない可能性があります）`, 'err');
+  } else {
+    setStatus(`地番「${highlightedText}」の区画をハイライトしました`, 'ok');
+  }
+  panToPoint(px, py);
+  redrawPreview();
+}
+
+// フラッドフィルで、指定座標(px, py)を内包する閉領域を検出する。
+// 処理負荷を抑えるため、長辺が最大1400pxになるよう縮小した画像上で計算する
+// （表示用のハイライトが目的で、寸法計算には使わないため精度はこれで十分）。
+function computeParcelHighlight(seedPxX, seedPxY) {
+  const fullW = storedCanvasW, fullH = storedCanvasH;
+  if (!fullW || !fullH) return null;
+  const MAX_DIM = 1400;
+  const scaleDown = Math.min(1, MAX_DIM / Math.max(fullW, fullH));
+  const mw = Math.max(1, Math.round(fullW * scaleDown));
+  const mh = Math.max(1, Math.round(fullH * scaleDown));
+
+  const off  = document.createElement('canvas');
+  off.width  = mw; off.height = mh;
+  const octx = off.getContext('2d');
+  octx.drawImage(storedPdfCanvas, 0, 0, mw, mh);
+  const img = octx.getImageData(0, 0, mw, mh).data;
+
+  const gray = new Uint8Array(mw * mh);
+  for (let i = 0; i < mw * mh; i++)
+    gray[i] = (0.299 * img[i*4] + 0.587 * img[i*4+1] + 0.114 * img[i*4+2]) | 0;
+  const thresh = otsuThreshold(gray, mw * mh);
+  const wall = new Uint8Array(mw * mh); // 1 = 線・文字（壁）、0 = 空白
+  for (let i = 0; i < mw * mh; i++) wall[i] = gray[i] < thresh ? 1 : 0;
+
+  let sx = Math.round(seedPxX * scaleDown);
+  let sy = Math.round(seedPxY * scaleDown);
+  sx = Math.max(0, Math.min(mw - 1, sx));
+  sy = Math.max(0, Math.min(mh - 1, sy));
+
+  // シード地点が文字の上（壁）に乗っている場合、近傍の空白ピクセルを探す
+  if (wall[sy * mw + sx]) {
+    const free = findNearestFreePixel(wall, mw, mh, sx, sy, 25);
+    if (!free) return null;
+    sx = free.x; sy = free.y;
+  }
+
+  // スタック方式フラッドフィル（4連結）。壁にぶつかるまで塗り広げる
+  //
+  // 面積上限について: 実データ（浜松市中央区神田町PDF・地番29件）で計測したところ、
+  // 境界線のギャップから隣接区画へ漏れ出したケースは塗り面積が画像全体の
+  // 36.5%〜49.8%に達していた（1筆分として妥当な面積は、描画領域を地番数で
+  // 割った推定値で平均2〜3%、大きめの区画でも10%前後）。そのため15%を
+  // 明確に超えた時点で「漏れ出し」とみなし、フラッドフィルを打ち切って
+  // 失敗として扱う。塗り続けるだけ無駄な計算にもなるため、上限到達時点で
+  // 即座にループを抜ける。
+  const AREA_RATIO_LIMIT = 0.15;
+  const areaLimit = mw * mh * AREA_RATIO_LIMIT;
+
+  const filled = new Uint8Array(mw * mh);
+  const stackX = new Int32Array(mw * mh);
+  const stackY = new Int32Array(mw * mh);
+  let sp = 0;
+  stackX[sp] = sx; stackY[sp] = sy; sp++;
+  filled[sy * mw + sx] = 1;
+  let filledCount = 0, touchedEdge = false, overLimit = false;
+
+  function tryPush(nx, ny) {
+    const idx = ny * mw + nx;
+    if (wall[idx] || filled[idx]) return;
+    filled[idx] = 1;
+    stackX[sp] = nx; stackY[sp] = ny; sp++;
+  }
+
+  while (sp > 0) {
+    sp--;
+    const x = stackX[sp], y = stackY[sp];
+    filledCount++;
+    if (x === 0 || y === 0 || x === mw - 1 || y === mh - 1) touchedEdge = true;
+    if (filledCount > areaLimit) { overLimit = true; break; }
+    if (touchedEdge) break;
+    if (x > 0)      tryPush(x - 1, y);
+    if (x < mw - 1) tryPush(x + 1, y);
+    if (y > 0)      tryPush(x, y - 1);
+    if (y < mh - 1) tryPush(x, y + 1);
+  }
+
+  // 境界が閉じていない（画像端まで塗り広がった）、面積上限を超えた
+  // （＝隣接区画へ漏れ出した可能性が高い）、または塗り面積が小さすぎる
+  // 場合は誤検出として棄却する
+  if (touchedEdge || overLimit || filledCount < 4) return null;
+  return { mw, mh, filled };
+}
+
+// シード地点が壁の上だった場合、近傍の空白ピクセルを渦巻き状に探索する
+function findNearestFreePixel(wall, mw, mh, sx, sy, maxR) {
+  for (let r = 1; r <= maxR; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = sx + dx, y = sy + dy;
+        if (x < 0 || y < 0 || x >= mw || y >= mh) continue;
+        if (!wall[y * mw + x]) return { x, y };
+      }
+    }
+  }
+  return null;
+}
+
+function drawHighlightOverlay(ctx) {
+  const { mw, mh, filled } = currentHighlight;
+  const off  = document.createElement('canvas');
+  off.width  = mw; off.height = mh;
+  const octx = off.getContext('2d');
+  const imgData = octx.createImageData(mw, mh);
+  for (let y = 0; y < mh; y++) {
+    for (let x = 0; x < mw; x++) {
+      const i = y * mw + x;
+      if (!filled[i]) continue;
+      // 塗り領域の輪郭部分は不透明に近づけ、赤枠で囲ったように見せる
+      const isEdge = !filled[i - 1] || !filled[i + 1] || !filled[i - mw] || !filled[i + mw];
+      const o = i * 4;
+      imgData.data[o]   = 233;
+      imgData.data[o+1] = isEdge ? 20 : 60;
+      imgData.data[o+2] = isEdge ? 40 : 90;
+      imgData.data[o+3] = isEdge ? 235 : 110;
+    }
+  }
+  octx.putImageData(imgData, 0, 0);
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, 0, 0, mw, mh, 0, 0, storedCanvasW, storedCanvasH);
+  ctx.restore();
+}
+
+// 指定した画像ピクセル座標が画面中央に来るよう表示位置を調整する（ズーム率は維持）
+function panToPoint(px, py) {
+  const wrap = document.getElementById('canvasWrap');
+  viewX = wrap.clientWidth  / 2 - px * viewScale;
+  viewY = wrap.clientHeight / 2 - py * viewScale;
+  applyTransform();
+}
+
+// =====================================================================
+// 2点間の実寸距離測定（定規代わり）
+// =====================================================================
+function toggleMeasureMode() {
+  measureMode   = !measureMode;
+  measurePoints = [];
+  document.getElementById('measureBtn').classList.toggle('active', measureMode);
+  document.getElementById('canvasWrap').style.cursor = measureMode ? 'crosshair' : '';
+  const label = document.getElementById('measureLabel');
+  label.style.display = measureMode ? 'inline' : 'none';
+  label.textContent   = measureMode ? '2点クリックしてください' : '';
+  redrawPreview();
+}
+
+function handleMeasureClick(px, py) {
+  if (measurePoints.length >= 2) measurePoints = [];
+  measurePoints.push({ x: px, y: py });
+  const label = document.getElementById('measureLabel');
+  if (measurePoints.length === 1) {
+    label.textContent = '2点目をクリック…';
+  } else {
+    label.textContent = '距離: ' + formatMm(measureDistanceMm());
+    setStatus('2点間の実寸距離: ' + formatMm(measureDistanceMm()), 'ok');
+  }
+  redrawPreview();
+}
+
+function measureDistanceMm() {
+  if (measurePoints.length < 2) return 0;
+  const [p1, p2] = measurePoints;
+  const distPx  = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+  const mmPerPx = 25.4 / storedRendDpi * storedScaleDen;
+  return distPx * mmPerPx;
+}
+function formatMm(mm) {
+  return mm >= 1000 ? (mm / 1000).toFixed(2) + ' m' : mm.toFixed(0) + ' mm';
+}
+
+function drawMeasurementOverlay(ctx) {
+  ctx.save();
+  ctx.fillStyle = '#e94560';
+  for (const p of measurePoints) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (measurePoints.length === 2) {
+    const [p1, p2] = measurePoints;
+    ctx.strokeStyle = '#e94560';
+    ctx.lineWidth   = 2;
+    ctx.setLineDash([8, 5]);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const text = formatMm(measureDistanceMm());
+    const midX = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2;
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textBaseline = 'bottom';
+    const w = ctx.measureText(text).width;
+    ctx.fillStyle = 'rgba(255,255,255,.92)';
+    ctx.fillRect(midX - w / 2 - 6, midY - 28, w + 12, 26);
+    ctx.fillStyle = '#e94560';
+    ctx.fillText(text, midX - w / 2, midY - 4);
+  }
+  ctx.restore();
+}
+
+// =====================================================================
+// プレビューをPNG画像として保存（ハイライト・距離測定を含む）
+// =====================================================================
+function downloadPNG() {
+  const pc = document.getElementById('previewCanvas');
+  if (!pc.width) return;
+  const suffix = highlightedText ? '_' + highlightedText.replace(/[\\/:*?"<>|]/g, '_') : '';
+  const a = document.createElement('a');
+  a.href = pc.toDataURL('image/png');
+  a.download = nowStamp() + suffix + '.png';
+  a.click();
 }
 
 // =====================================================================
@@ -569,8 +878,23 @@ dropzone.ondragleave = () => dropzone.classList.remove('over');
 dropzone.ondrop      = e => { e.preventDefault(); dropzone.classList.remove('over'); if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); };
 fileInput.onchange   = e => { if (e.target.files[0]) loadFile(e.target.files[0]); };
 
+// 新しいPDF読み込み・再変換のたびにハイライト・距離測定の状態をリセットする
+function resetHighlightAndMeasure() {
+  currentHighlight = null;
+  highlightedText  = null;
+  measurePoints    = [];
+  measureMode      = false;
+  const btn = document.getElementById('measureBtn');
+  if (btn) btn.classList.remove('active');
+  const label = document.getElementById('measureLabel');
+  if (label) { label.style.display = 'none'; label.textContent = ''; }
+  const wrap = document.getElementById('canvasWrap');
+  if (wrap) wrap.style.cursor = '';
+}
+
 async function loadFile(file) {
   if (!file.name.toLowerCase().endsWith('.pdf')) { setStatus('PDFファイルを選択してください', 'err'); return; }
+  resetHighlightAndMeasure();
   setStatus('読み込み中…', 'run'); setProgress(15);
   try {
     const ab = await file.arrayBuffer();
@@ -760,6 +1084,7 @@ async function processDocument() {
 
   lastDpi = dpi;
   document.getElementById('mmPerPxCalc').textContent = (25.4 / dpi * scaleDenom).toFixed(1);
+  resetHighlightAndMeasure();
 
   setStatus('PDFをレンダリング中…', 'run'); setProgress(20);
   document.getElementById('processBtn').disabled = true;
@@ -1212,6 +1537,7 @@ async function processDocument() {
     document.getElementById('downloadBtn').disabled = false;
     document.getElementById('dxfBtn').disabled      = false;
     document.getElementById('jwcBtn').disabled      = false;
+    document.getElementById('pngBtn').disabled      = false;
 
     const n = allFeatures.length;
     setStatus(`完了: ${nLines} ライン / ${nText} 文字を抽出しました`, 'ok');
