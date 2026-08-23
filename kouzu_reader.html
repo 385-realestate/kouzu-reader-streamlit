@@ -1388,6 +1388,14 @@ async function processDocument() {
           const CHIBAN_RE = /^[0-9]{1,5}(-[0-9]{1,3})?$/;
           const adoptedBoxes = new Set();
           let reclassified = 0;
+          // このループ自体はOCR推論を伴わない純粋な幾何計算(chain×OCR領域の
+          // 総当たり判定)だが、チェーン数が数千件規模になる図面では
+          // ノンストップで実行すると数秒〜十数秒メインスレッドを連続占有し、
+          // Worker化したOCR推論とは別の「ページの応答がありません」要因に
+          // なることを実測で確認した。判定ロジック・閾値には一切手を加えず、
+          // 一定件数ごとにawait tick()でイベントループへ制御を返すだけの
+          // 変更で、結果は変えずにブロック時間を分割できる。
+          let __reclassifyTickCounter = 0;
           for (const f of features) {
             // ラスター起源のチェーンは全て'border'として渡ってくるが、
             // ベクター起源の場合はclassifyVectorFeatures()が既に小図形を
@@ -1406,6 +1414,7 @@ async function processDocument() {
                 CHIBAN_RE.test(domBox.text)) {
               adoptedBoxes.add(domBox);
             }
+            if ((++__reclassifyTickCounter % 400) === 0) await tick();
           }
           console.log('[OCR] 境界線→文字へ再分類:', reclassified, '件 / 実テキスト採用候補:', adoptedBoxes.size, '件');
 
@@ -1448,6 +1457,11 @@ async function processDocument() {
                   console.warn('[OCR二段階検証] エラーのため不採用:', b.text, e);
                   adoptedBoxes.delete(b);
                 }
+                // renderPdfRegion()のPDF再レンダリング(canvas描画)はメイン
+                // スレッド上の同期処理のため、候補数が多い図面ではこのループ
+                // 自体がメインスレッドを連続占有しうる。判定内容は変えず、
+                // 候補ごとに必ずイベントループへ制御を返す。
+                await tick();
               }
             } catch (e) {
               console.warn('[OCR二段階検証] PaddleOCRエンジン取得失敗:', e);
@@ -1459,12 +1473,24 @@ async function processDocument() {
             // 採用が決まった領域について、その領域が「支配的」であるチェーンだけを
             // 取り除き、代わりに実テキスト(Point)を追加する（判定基準を採用時と
             // 揃えることで、無関係なチェーンまで消してしまうのを防ぐ）
-            features = features.filter(f => {
-              if (f.properties.layerType !== 'text') return true;
-              const { lenByBox, total } = matchedBoxes(f);
-              const { domBox, domRatio } = dominantBox(lenByBox, total);
-              return !(domBox && adoptedBoxes.has(domBox) && domRatio >= DOM_RATIO_THRESHOLD);
-            });
+            // 上と同じ理由（判定ロジックは変更せず、重い幾何計算の連続実行を
+            // 分割するためだけ）に、.filter()の代わりに手動ループへ書き換えて
+            // 定期的にawait tick()する。
+            {
+              const keptFeatures = [];
+              let __filterTickCounter = 0;
+              for (const f of features) {
+                let keep = true;
+                if (f.properties.layerType === 'text') {
+                  const { lenByBox, total } = matchedBoxes(f);
+                  const { domBox, domRatio } = dominantBox(lenByBox, total);
+                  keep = !(domBox && adoptedBoxes.has(domBox) && domRatio >= DOM_RATIO_THRESHOLD);
+                }
+                if (keep) keptFeatures.push(f);
+                if ((++__filterTickCounter % 400) === 0) await tick();
+              }
+              features = keptFeatures;
+            }
 
             // fontSize外れ値ガード: OCR検出bbox高さは低DPIパス(OCR_SCAN_DPIS内の
             // 120/150dpi)ほどpx量子化誤差がmm換算で拡大される（例: 120dpi・縮尺
@@ -2326,6 +2352,37 @@ function buildBinarizedCanvasForOcr(srcCanvas, thinLine) {
 // PDF・画像データを外部へ送信することはない（モデルファイル自体はCDNから
 // 取得するのみで、Tesseract.jsが言語データをCDNから取得するのと同様）。
 // =====================================================================
+// PaddleOCR.js公式のworker:true（既定のcreateWorker）は、内部で
+// `new Worker(new URL("./assets/worker-entry-*.js", ...), {type:'module'})`
+// のように「CDN上の絶対URL」を直接new Worker()へ渡す実装になっている。
+// 実PDFでの実測検証の結果、これはブラウザの仕様上
+// （`new Worker(url)`はCORSヘッダーの有無に関わらず常に同一オリジンの
+// スクリプトしか許可しない。`<script type="module">`や動的import()とは
+// 異なる制限）、CDN(jsDelivr)からロードしているこのアプリでは常に
+// `SecurityError: Failed to construct 'Worker'`で失敗することを確認した。
+// 回避策として、worker本体スクリプトを一度fetch()でテキスト取得し、
+// Blob URL（呼び出し元と常に同一オリジン扱いになる）を経由してWorkerを
+// 生成する（jsDelivrはAccess-Control-Allow-Origin: *を返すためfetch自体は
+// 許可されている）。ライブラリのバージョンを更新した場合は、
+// PADDLE_OCR_WORKER_SCRIPT_URL内のファイル名（ビルドごとに変わる内部
+// ハッシュ）を更新すること（+esmバンドル内の
+// `new URL("./assets/worker-entry-<hash>.js", ...)`から確認できる）。
+const PADDLE_OCR_WORKER_SCRIPT_URL =
+  'https://cdn.jsdelivr.net/npm/@paddleocr/paddleocr-js@0.4.2/dist/assets/worker-entry-C9UNuyOJ.js';
+let __paddleOcrWorkerBlobUrlPromise = null;
+function getPaddleOcrWorkerBlobUrl() {
+  if (!__paddleOcrWorkerBlobUrlPromise) {
+    __paddleOcrWorkerBlobUrlPromise = fetch(PADDLE_OCR_WORKER_SCRIPT_URL)
+      .then(r => {
+        if (!r.ok) throw new Error('OCR worker scriptの取得に失敗: HTTP ' + r.status);
+        return r.text();
+      })
+      .then(code => URL.createObjectURL(new Blob([code], { type: 'text/javascript' })))
+      .catch(e => { __paddleOcrWorkerBlobUrlPromise = null; throw e; });
+  }
+  return __paddleOcrWorkerBlobUrlPromise;
+}
+
 let __paddleOcrEnginePromise = null;
 function getPaddleOcrEngine() {
   if (!__paddleOcrEnginePromise) {
@@ -2348,14 +2405,37 @@ function getPaddleOcrEngine() {
     // ライブラリを更新した場合は、jsDelivrの+esmバンドル内の
     // `import("/npm/onnxruntime-web@X/+esm")` のXを確認し、この値も合わせて
     // 更新すること（ズレるとまた同じ「Session mismatch」が再発する）。
-    __paddleOcrEnginePromise = window.__PaddleOCR.create({
+    const paddleOcrBaseOptions = {
       lang: 'ch',
       ocrVersion: 'PP-OCRv6',
       ortOptions: {
         backend: 'wasm',
         wasmPaths: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/',
       },
-    }).catch(e => { __paddleOcrEnginePromise = null; throw e; });
+    };
+    // Web Worker化（精度には無関係な高速化）: OCR推論(ONNX Runtime WebのWASM
+    // 実行)はメインスレッド上で同期的に走るため、複数DPIパス×二段階検証を
+    // 直列実行するとメインスレッドが長時間ブロックされ、ブラウザの
+    // 「ページの応答がありません」警告（ユーザー報告の"タイムアウトの
+    // アラート"の正体）を誘発する。worker: {createWorker}はPaddleOCR.js
+    // @0.4.2が公式サポートするオプションで、モデル選択・DPIパス構成・
+    // 二段階検証ロジックには一切触れず、同じ推論処理を別スレッド
+    // (Web Worker)へ逃がすだけなので認識精度・検出件数は変化しない。
+    // Blob URL経由でのWorker生成自体が失敗する環境（Streamlit側は
+    // components.html()でこのHTMLをsandboxed srcdoc iframeに描画しており、
+    // sandbox属性次第ではWorker生成そのものが禁止されうる）に備えて、
+    // 失敗時は従来通りメインスレッド実行にフォールバックする
+    // （精度への影響なし・速度改善が得られないだけ）。
+    __paddleOcrEnginePromise = getPaddleOcrWorkerBlobUrl()
+      .then(blobUrl => window.__PaddleOCR.create({
+        ...paddleOcrBaseOptions,
+        worker: { createWorker: () => new Worker(blobUrl, { type: 'module' }) },
+      }))
+      .catch(e => {
+        console.warn('[OCR] Web Worker初期化に失敗、メインスレッド実行にフォールバックします:', e);
+        return window.__PaddleOCR.create(paddleOcrBaseOptions);
+      })
+      .catch(e => { __paddleOcrEnginePromise = null; throw e; });
   }
   return __paddleOcrEnginePromise;
 }
