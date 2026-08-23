@@ -1241,7 +1241,11 @@ async function processDocument() {
           // DPI(OCR_SCAN_DPIS)でPDFの有効領域(ヘッダー・表を除いた帯)を直接
           // 再レンダリングしてOCRする。複数DPIを試して結果をマージすることで、
           // 文字サイズが文書内でばらついていても片方のDPIで拾えるようにする。
-          const OCR_SCAN_DPIS = [120, 150, 300];
+          // 実測(2026-08時点、神田町/下石田町PDF)で120/150/300dpiの3段階から
+          // 150dpiパスを除いた120/300dpiの2段階でも誤読の新規混入はなく、
+          // 検出漏れの微増(数件〜十数件程度)と引き換えに処理時間を2〜3割
+          // 短縮できたため、2段階を採用している。
+          const OCR_SCAN_DPIS = [120, 300];
           const bandTopFrac = kouzuOpt ? topExclFrac : 0;
           const bandBotFrac = kouzuOpt ? (1 - botExclFrac) : 1;
 
