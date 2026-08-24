@@ -488,8 +488,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('canvasWrap').classList.remove('dragging');
   });
   // 距離測定モード: ドラッグ（パン操作）でないクリックのみ測定点として採用する
+  // ※ zoom-ctrl（📏ボタン等の操作パネル）はcanvasWrapの子要素のためクリックが
+  //   バブリングしてくる。ボタン操作自体を測定点として誤カウントしないよう除外する。
   wrap.addEventListener('click', e => {
     if (!measureMode || !storedPdfCanvas || _dragMoved) return;
+    if (e.target.closest('.zoom-ctrl')) return;
     const r = wrap.getBoundingClientRect();
     const localX = e.clientX - r.left, localY = e.clientY - r.top;
     const px = (localX - viewX) / viewScale;
