@@ -292,6 +292,11 @@
           </label>
         </div>
       </div>
+      <div class="sg" style="margin-bottom:6px">
+        <label>地番文字の出力サイズ（紙面mm・全ラベル統一）</label>
+        <input type="number" id="labelTextHeightMm" value="2.0" min="0.5" max="10" step="0.1" style="width:70px" oninput="redrawPreview()">
+        <div class="hint">元図面から読み取った文字はサイズがバラつくため、DXF/JWC出力とプレビューの地番文字を全てこの高さに統一します。</div>
+      </div>
       <div style="font-size:10px;color:#666;background:#0f3460;border-radius:4px;padding:6px;margin-bottom:4px">
         💡 変換式: 実寸 = pixel × (25.4/DPI) × 縮尺分母<br>
         　例) DPI=200, 1:500 → 1px = <span id="mmPerPxCalc">63.5</span> mm
@@ -402,6 +407,15 @@ let storedPdfCanvas = null, storedLineFeats = [], storedTextFeats = [];
 // （高コントラスト色で最前面に描画）が見やすくなる。
 let bgOpacity = 1.0;
 function setBgOpacity(v) { bgOpacity = Math.max(0.1, Math.min(1, v / 100)); redrawPreview(); }
+
+// 地番文字の出力サイズ（紙面mm）。元図面から読み取った文字はOCR誤差等で
+// サイズがバラつくため、個々の feat.properties.fontSize は使わず、この
+// 統一値をDXF/JWC出力・プレビュー双方で使う。
+function getLabelTextHeightMm() {
+  const el = document.getElementById('labelTextHeightMm');
+  const v  = el ? parseFloat(el.value) : NaN;
+  return (isFinite(v) && v > 0) ? v : 2.0;
+}
 let storedCanvasW = 0, storedCanvasH = 0, storedScaleDen = 500, storedRendDpi = 200;
 
 // 地番ハイライト・距離測定（定規代わり）の状態
@@ -1978,8 +1992,9 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
   for (const feat of geojson.features) {
     if (feat.geometry.type !== 'Point' || !feat.properties.text) continue;
     const [mx, my] = toPaper(toMm(feat.geometry.coordinates));
-    // fontSizeは既に実寸mm（縮尺倍済み）で保存されているのでそのまま使う
-    const textH = Math.max(1.0, feat.properties.fontSize || 3.0 * scaleDenom);
+    // 元図面から読み取った feat.properties.fontSize はバラつくため使わず、
+    // 設定パネルの「地番文字の出力サイズ」（紙面mm）を実寸mmに換算し統一する
+    const textH = Math.max(0.5, getLabelTextHeightMm() * scaleDenom);
     w('  0','TEXT');
     w('  8','kouzu_label');
     w('  6','CONTINUOUS');
@@ -2114,7 +2129,8 @@ function geojsonToJWC(geojson, scaleDenom, dpi) {
   for (const feat of geojson.features) {
     if (feat.geometry.type !== 'Point' || !feat.properties.text) continue;
     const [mx, my] = toPaper(toMm(feat.geometry.coordinates));
-    const h = Math.max(0.5, feat.properties.fontSize || 3.0 * scaleDenom);
+    // DXF出力と同じく、統一した地番文字の出力サイズ（紙面mm→実寸mm）を使う
+    const h = Math.max(0.5, getLabelTextHeightMm() * scaleDenom);
     // TJ: X Y 角度 文字高 文字幅 字間 種別 斜体 ゴシック 基点
     L.push(`TJ ${mx.toFixed(3)} ${my.toFixed(3)} 0 ${h.toFixed(3)} 0 0 0 0 0 0`);
     L.push(feat.properties.text);
@@ -2555,17 +2571,19 @@ function drawTextLabels(ctx, textFeatures, imgW, imgH, scaleDenom, dpi) {
   // 近接ラベルの間引き: 密集地では中心距離がフォントサイズ未満のラベルを
   // 重複描画しない（先に処理された方を優先）。文字の重なり自体を減らし、
   // 境界線を覆う面積を抑える。
+  // フォントサイズは元図面から読み取った feat.properties.fontSize（バラつき
+  // あり）を使わず、設定パネルの「地番文字の出力サイズ」で全ラベル統一する。
+  const fsPx = Math.max(4, Math.min(24, getLabelTextHeightMm() * dpi / 25.4));
+  ctx.font = `${fsPx.toFixed(1)}px monospace`;
   const drawn = [];
   textFeatures.forEach(feat => {
     if (feat.geometry.type !== 'Point') return;
     const [mx, my] = feat.geometry.coordinates;
     const px = mx * mmToPixFactor;
     const py = imgH - my * mmToPixFactor;
-    const fsPx = Math.max(6, Math.min(14, feat.properties.fontSize * mmToPixFactor));
     const minDist = fsPx * 1.2;
     if (drawn.some(d => Math.hypot(d.px - px, d.py - py) < minDist)) return;
     drawn.push({ px, py });
-    ctx.font = `${fsPx.toFixed(0)}px monospace`;
     ctx.fillText(feat.properties.text, px, py);
   });
   ctx.restore();
