@@ -1328,12 +1328,18 @@ async function processDocument() {
           }
           console.log('[OCR] 検出語数(合計・複数DPIマージ):', ocrWordsRawAll.length);
 
-          // マスク用フィルタ: 数字を1文字以上含み、信頼度が低すぎない・
-          // 極端に細長い(誤認識の帯状ノイズ等)ものは除外する
+          // 地番以外で確定採用してよい注記文字（道路=「道」・水路=「水」）。
+          // 地番との誤認を避けるため、この1文字のみの完全一致に限定する
+          // （例:「道路」「水田」等の複合語や、他の漢字を含む語は対象外）。
+          const NOTATION_CHARS = ['道', '水'];
+
+          // マスク用フィルタ: 数字を1文字以上含む語、または「道」「水」の
+          // 1文字注記を対象とし、信頼度が低すぎない・極端に細長い
+          // (誤認識の帯状ノイズ等)ものは除外する
           const MASK_MIN_CONF = 25;
           const ocrWords = ocrWordsRawAll.filter(w => {
             if (w.confidence < MASK_MIN_CONF) return false;
-            if (!/[0-9]/.test(w.text)) return false;
+            if (!/[0-9]/.test(w.text) && !NOTATION_CHARS.includes(w.text)) return false;
             const bw = w.bbox.x1 - w.bbox.x0, bh = w.bbox.y1 - w.bbox.y0;
             if (bw <= 0 || bh <= 0) return false;
             const aspect = Math.max(bw, bh) / Math.min(bw, bh);
@@ -1437,7 +1443,10 @@ async function processDocument() {
           // こちらも二段階検証頼みで足切りを緩める。
           const LABEL_MIN_CHAR_CONF = 30;
           const DOM_RATIO_THRESHOLD = 0.5; // 支配的な領域単独でチェーンの50%以上を説明できること
-          const CHIBAN_RE = /^[0-9]{1,5}(-[0-9]{1,3})?$/;
+          // 地番（数字-数字）に加え、道路・水路注記の「道」「水」1文字のみを
+          // 特別に許可する（NOTATION_CHARSと同じ2文字に限定し、他の漢字は
+          // 地番との誤認防止のため引き続き対象外のまま）。
+          const CHIBAN_RE = /^([0-9]{1,5}(-[0-9]{1,3})?|道|水)$/;
           const adoptedBoxes = new Set();
           let reclassified = 0;
           // このループ自体はOCR推論を伴わない純粋な幾何計算(chain×OCR領域の
