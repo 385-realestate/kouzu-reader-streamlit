@@ -1163,6 +1163,15 @@ async function processDocument() {
     // ヒューリスティクスで「文字らしき小図形」「方角記号らしき図形」を分類する。
     classifyVectorFeatures(features, scaleDenom);
 
+    // 途切れ線の推論延長処理(snapChainEndpointsByExtension)は従来ラスター
+    // 処理(needRasterTrace)の内側でしか動いておらず、ベクターPDF（実データの
+    // 線・テキストが取得できる公図PDF）ではT字路等のわずかな途切れが未補正
+    // のまま残っていた。斜線強化(forceRaster)時はこの後ラスター結果で
+    // featuresごと上書きされるため、その場合はここでは実行しない。
+    if (features.length > 0 && !forceRaster) {
+      features = closeGapsInVectorFeatures(features, scaleDenom, dpi);
+    }
+
     // 公図最適化のヘッダー・表除外範囲（UIから可変。既定 上7%/下27%）。
     // ベクター実テキストのフィルタ・ラスター行マスク・OCR高DPI帯のいずれも
     // この値を共通で使う（別々の固定値だと文書によって除外範囲がズレる）。
@@ -2926,6 +2935,86 @@ function snapChainEndpointsByExtension(chains, opts = {}) {
     pts: it.pts, layerType: it.layerType,
     pixLen: chains[i].pixLen, straightness: chains[i].straightness,
   }));
+}
+
+// =====================================================================
+// ベクター抽出線への途切れ補正の適用
+// mergeCollinearChains / snapChainEndpointsByExtension はもともとラスター
+// 細線化トレース専用（needRasterTrace内）だったが、ベクターPDF（実データの
+// 線・テキストが取得できる公図PDF）ではこの延長・スナップ処理が一切
+// 適用されず、T字路・十字路付近のわずかな途切れが残る問題があった。
+// mm実寸座標のベクターLineStringを、表示DPI基準の仮想px空間に変換して
+// 同じアルゴリズムを適用し、結果をmm実寸へ戻す。
+// 'text'・'direction'に分類済みの図形（文字・方角記号の輪郭）は対象外
+// （結合・延長すると文字形状が壊れるため）。
+// =====================================================================
+function closeGapsInVectorFeatures(features, scaleDenom, dpi) {
+  const mmToPx = dpi / (25.4 * scaleDenom);
+
+  // mergeCollinearChains/snapChainEndpointsByExtensionの既定値(px)は、
+  // ラスター細線化(procDpi基準の画像px)向けに調整された値であり、そのまま
+  // ベクターへ流用すると「実寸何m」に相当するかがdpi/縮尺次第で大きく変動し、
+  // 縮尺が大きい図面ほど無関係な離れた線同士を誤って繋いでしまう危険がある
+  // （例: dpi400・1:1000だと既定gapTol=40pxは実寸約2.5mに相当してしまう）。
+  // そのためベクター側では「実寸mm」で許容量を固定し、そこからpx換算する。
+  const GAP_TOL_MM_MERGE  = 100;  // mm実寸: ほぼ同一直線上とみなす断片の端点間隔
+  const PERP_TOL_MM_MERGE = 30;   // mm実寸: 直線からの垂直ズレ許容
+  const GAP_TOL_MM_SNAP   = 150;  // mm実寸: T字路等・延長線交点スナップの探索半径
+  const MAX_EXTEND_MM     = 200;  // mm実寸: 延長線の最大延長距離（安全装置）
+  const CONNECT_TOL_MM    = 1;    // mm実寸: これ以内なら「既に同一点＝本物の分岐点」とみなす
+  //（connectTolを未指定のまま既定2.5pxを使うと、mmToPxが小さい図面ではそれが
+  // 実寸で100mm超に化けてしまい、「本当は未接続の隙間」を"すでに接続済み"と
+  // 誤判定してスキップしてしまうバグがあったため、必ずmm換算で明示指定する）
+  const mergeOpts = { gapTol: GAP_TOL_MM_MERGE * mmToPx, perpTol: PERP_TOL_MM_MERGE * mmToPx };
+  const snapOpts  = {
+    gapTol: GAP_TOL_MM_SNAP * mmToPx,
+    maxExtend: MAX_EXTEND_MM * mmToPx,
+    connectTol: CONNECT_TOL_MM * mmToPx,
+  };
+
+  const candidates = [], others = [];
+  features.forEach(f => {
+    const lt = f.properties && f.properties.layerType;
+    if (f.geometry.type === 'LineString' && lt !== 'text' && lt !== 'direction') {
+      candidates.push(f);
+    } else {
+      others.push(f);
+    }
+  });
+  if (candidates.length < 2) return features;
+
+  const chains = candidates.map(f => {
+    const pts = f.geometry.coordinates.map(([mx, my]) => [mx * mmToPx, my * mmToPx]);
+    let pixLen = 0;
+    for (let i = 1; i < pts.length; i++)
+      pixLen += Math.hypot(pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]);
+    return { pts, layerType: f.properties.layerType, pixLen, straightness: f.properties.straightness ?? 1 };
+  });
+
+  let snapped;
+  try {
+    const merged = mergeCollinearChains(chains, mergeOpts);
+    snapped = snapChainEndpointsByExtension(merged, snapOpts);
+  } catch (e) {
+    console.warn('[ベクター途切れ補正] 処理失敗のため元のベクター線を使用:', e);
+    return features;
+  }
+
+  const closed = snapped.map((c, i) => ({
+    type: 'Feature',
+    geometry: {
+      type: 'LineString',
+      coordinates: c.pts.map(([px, py]) => [+(px / mmToPx).toFixed(3), +(py / mmToPx).toFixed(3)]),
+    },
+    properties: {
+      id: 'vecgap_' + i,
+      layerType: c.layerType,
+      straightness: +(c.straightness ?? 1).toFixed(3),
+    },
+  }));
+
+  console.log('[ベクター途切れ補正] 対象線:', candidates.length, '→ マージ+スナップ後:', closed.length);
+  return [...others, ...closed];
 }
 
 // =====================================================================
