@@ -346,6 +346,10 @@
         <button class="lbtn on" id="lbtn-frame"     onclick="toggleLayer('frame')">外枠</button>
         <button class="lbtn on" id="lbtn-label"     onclick="toggleLayer('label')">地番</button>
         <button class="lbtn on" id="lbtn-direction" onclick="toggleLayer('direction')">方角</button>
+        <span style="margin-left:8px;font-size:10px;color:#666">背景:</span>
+        <input type="range" id="bgOpacitySlider" min="10" max="100" value="100" step="5"
+               style="width:70px;vertical-align:middle" oninput="setBgOpacity(this.value)"
+               title="元図面（背景ラスター）の濃さ。下げると境界線が見やすくなります">
       </div>
       <div class="dl-group">
         <button class="btn-dl"  id="downloadBtn" disabled onclick="downloadGeoJSON()">GeoJSON</button>
@@ -393,6 +397,11 @@ let _isDrag = false, _ds = {x:0,y:0}, _dv = {x:0,y:0};
 // レイヤ表示状態
 const layerVisible = { frame: true, border: true, label: true, direction: true };
 let storedPdfCanvas = null, storedLineFeats = [], storedTextFeats = [];
+// 背景ラスター（元PDFの見た目そのまま。地番文字も色付きで焼き込まれている）の
+// 表示不透明度。下げるほど背景の色付き文字が薄まり、抽出済みの境界線
+// （高コントラスト色で最前面に描画）が見やすくなる。
+let bgOpacity = 1.0;
+function setBgOpacity(v) { bgOpacity = Math.max(0.1, Math.min(1, v / 100)); redrawPreview(); }
 let storedCanvasW = 0, storedCanvasH = 0, storedScaleDen = 500, storedRendDpi = 200;
 
 // 地番ハイライト・距離測定（定規代わり）の状態
@@ -488,18 +497,34 @@ function redrawPreview() {
   const pc  = document.getElementById('previewCanvas');
   const ctx = pc.getContext('2d');
   ctx.clearRect(0, 0, pc.width, pc.height);
+  // 背景ラスターには元PDFの色付き地番文字がそのまま焼き込まれているため、
+  // bgOpacityで薄めて描く（境界線の抽出ベクターが後段で上から見やすい
+  // コントラスト色で重ね描きされる）。
+  ctx.save();
+  ctx.globalAlpha = bgOpacity;
   ctx.drawImage(storedPdfCanvas, 0, 0);
-  const vis = storedLineFeats.filter(f => {
+  ctx.restore();
+  // 情報系レイヤ（文字らしき輪郭・方角記号）を先に描画
+  const visInfo = storedLineFeats.filter(f => {
     const lt = f.properties.layerType;
-    if (lt === 'frame')     return layerVisible.frame;
     if (lt === 'text')      return layerVisible.label;
     if (lt === 'direction') return layerVisible.direction;
-    return layerVisible.border;
+    return false;
   });
-  if (vis.length)
-    drawContours(ctx, vis, storedCanvasW, storedCanvasH, storedScaleDen, storedRendDpi);
+  if (visInfo.length)
+    drawContours(ctx, visInfo, storedCanvasW, storedCanvasH, storedScaleDen, storedRendDpi);
   if (layerVisible.label && storedTextFeats.length)
     drawTextLabels(ctx, storedTextFeats, storedCanvasW, storedCanvasH, storedScaleDen, storedRendDpi);
+  // 境界線・外枠は背景の色付き文字に紛れないよう、最後に高コントラスト色で
+  // 重ね描きし、常に視認できるようにする。
+  const visStruct = storedLineFeats.filter(f => {
+    const lt = f.properties.layerType;
+    if (lt === 'frame') return layerVisible.frame;
+    if (lt === 'text' || lt === 'direction') return false;
+    return layerVisible.border;
+  });
+  if (visStruct.length)
+    drawContours(ctx, visStruct, storedCanvasW, storedCanvasH, storedScaleDen, storedRendDpi);
   if (currentHighlight) drawHighlightOverlay(ctx);
   if (measurePoints.length) drawMeasurementOverlay(ctx);
 }
@@ -1669,8 +1694,10 @@ function drawContours(ctx, features, imgW, imgH, scaleDenom, dpi) {
   // レイヤ種別ごとのプレビュー色。DXF/JWC出力の色分け（境界線=黄, 文字=緑,
   // 方角=青）と対応関係が分かるよう、境界線/外枠は既存のアクセント色のまま、
   // 文字・方角は別色にする。
-  const COLOR_BY_LAYER = { text: '#7CFC00', direction: '#3FA9F5' };
-  const DEFAULT_COLOR  = '#e94560';
+  // 境界線/外枠は背景ラスターに焼き込まれた地番文字（橙・赤・緑系が多い）と
+  // 色相が被らないシアン/白系にし、背景に紛れず視認できるようにする。
+  const COLOR_BY_LAYER = { text: '#7CFC00', direction: '#3FA9F5', frame: '#ffffff', border: '#00e5ff' };
+  const DEFAULT_COLOR  = '#00e5ff';
   ctx.save();
   features.forEach(feat => {
     const pts = feat.geometry.type === 'LineString'
@@ -1687,8 +1714,10 @@ function drawContours(ctx, features, imgW, imgH, scaleDenom, dpi) {
       ctx.lineWidth   = 0.6;
       ctx.globalAlpha = 0.35;
     } else {
-      ctx.lineWidth   = 1.2;
-      ctx.globalAlpha = 0.85;
+      // 境界線・外枠は背景の色付き文字に埋もれないよう、線幅・不透明度を
+      // 上げて最前面で確実に視認できるようにする。
+      ctx.lineWidth   = 1.6;
+      ctx.globalAlpha = 1.0;
     }
     ctx.strokeStyle = COLOR_BY_LAYER[lt] || DEFAULT_COLOR;
     const [sx, sy] = mmToPx(pts[0]);
