@@ -2518,13 +2518,24 @@ function drawTextLabels(ctx, textFeatures, imgW, imgH, scaleDenom, dpi) {
   const mmToPixFactor = dpi / (25.4 * scaleDenom);
   ctx.save();
   ctx.fillStyle   = '#ffd700';
-  ctx.globalAlpha = 0.9;
+  // 1/1000等の広域縮尺では区画が密集し、文字が境界線を覆い隠しやすいため
+  // 半透明にして線が透けて見えるようにする（フォントサイズ下限8pxの
+  // クランプにより、区画が数pxしかない場合でも文字は最低限の可読サイズを
+  // 保つ＝結果的に線より文字が大きくなりがちなことへの緩和策）。
+  ctx.globalAlpha = 0.55;
+  // 近接ラベルの間引き: 密集地では中心距離がフォントサイズ未満のラベルを
+  // 重複描画しない（先に処理された方を優先）。文字の重なり自体を減らし、
+  // 境界線を覆う面積を抑える。
+  const drawn = [];
   textFeatures.forEach(feat => {
     if (feat.geometry.type !== 'Point') return;
     const [mx, my] = feat.geometry.coordinates;
     const px = mx * mmToPixFactor;
     const py = imgH - my * mmToPixFactor;
-    const fsPx = Math.max(8, Math.min(16, feat.properties.fontSize * mmToPixFactor));
+    const fsPx = Math.max(6, Math.min(14, feat.properties.fontSize * mmToPixFactor));
+    const minDist = fsPx * 1.2;
+    if (drawn.some(d => Math.hypot(d.px - px, d.py - py) < minDist)) return;
+    drawn.push({ px, py });
     ctx.font = `${fsPx.toFixed(0)}px monospace`;
     ctx.fillText(feat.properties.text, px, py);
   });
