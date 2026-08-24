@@ -1268,6 +1268,27 @@ async function processDocument() {
       }));
       coordSystem = 'mm_realworld';
       lastDpi     = procDpi;
+
+      // 方角記号(N記号)自動検出（2026-08-25追加）。図郭(frame)が検出できている
+      // ラスターPDFのみ対象。既存のborder/frameチェーンには一切手を加えず、
+      // 新規のdirectionレイヤー要素(LINE)を追加するだけの非破壊的な処理。
+      // 検出ロジック・設計根拠の詳細はdetectDirectionSymbol()のコメント参照。
+      const dirSymbol = detectDirectionSymbol(features, scaleDenom);
+      if (dirSymbol) {
+        features.push({
+          type: 'Feature',
+          geometry: {
+            type: 'LineString',
+            coordinates: [
+              [+dirSymbol.basePt[0].toFixed(3), +dirSymbol.basePt[1].toFixed(3)],
+              [+dirSymbol.tipPt[0].toFixed(3),  +dirSymbol.tipPt[1].toFixed(3)],
+            ],
+          },
+          properties: { layerType: 'direction', source: dirSymbol.source },
+        });
+        console.log('[方角] 検出方式:', dirSymbol.source,
+                     ' 根本:', dirSymbol.basePt, ' 先端:', dirSymbol.tipPt);
+      }
     }
 
     // PDF内に実テキストが1件も無い場合、OCR(PaddleOCR.js)で地番数字らしき
@@ -2608,6 +2629,103 @@ function drawTextLabels(ctx, textFeatures, imgW, imgH, scaleDenom, dpi) {
     ctx.fillText(feat.properties.text, px, py);
   });
   ctx.restore();
+}
+
+// =====================================================================
+// 方角記号(N記号)自動検出（2026-08-25追加）
+// -----------------------------------------------------------------------
+// 【経緯】2026-08-07にJS版でも一度実装を試みたが、「ページ左上」を基準にした
+// 固定位置・固定領域判定だったため、PDFごとのスキャン時の余白・トリミング差で
+// 位置がずれ、実測PDF(磐田市見付・浜松市中央区貴平町)で「PDFごとに位置・向きが
+// 異なる（道路沿いに斜めに配置される場合もある）」という結論に至り撤回された
+// （使い方.md「方角ボタン」の注記、git log参照）。
+//
+// 今回はPython版kouzu_to_dxf.py（detect_direction_symbol）の設計を移植する。
+// 決定的に異なる点は基準を「ページ」ではなく「図郭(用紙内枠)」にしたこと。
+// Python版は浜松市中央区神田町553番PDF(1/500)・浜松市中央区下石田町1578-2番PDF
+// (1/1000)の2サンプルで、図郭左上を原点としたページ上mm位置がほぼ同一(誤差
+// 0.3mm未満)であることを実測確認済み。本移植にあたり、JS版でも同じ2サンプルに
+// Playwrightで実データ検証を行い、独立に計算した図郭左上を基準にすると同じ相対
+// 位置（誤差1.5px≒0.13mm）に共通の線分パターンが検出されることを確認した上で
+// 実装している（検証スクリプトはscratchpadに保存、コミットメッセージ参照）。
+//
+// 【安全設計】(Python版を踏襲)
+// 固定オフセット位置(DIRECTION_BASE/TIP_OFFSET_MM、図郭左上原点のページ実寸mm)を
+// まず基準位置とし、その周辺(DIRECTION_SEARCH_MARGIN_MM)だけを再探索して実際の
+// 線分（ほぼ垂直・長さ6〜30mm）を検出する。再探索に失敗した場合は固定オフセットを
+// そのまま採用する（フォールバック、source="fallback(fixed-offset)"）。
+// 既存のborder/frameチェーンは変更・削除せず、新規のdirectionレイヤー要素(LINE)を
+// 追加するだけ（2026-08-07の旧実装は既存チェーンを方角レイヤへ付け替えて実境界線を
+// 巻き込んでしまう問題があったため、その反省を踏まえ非破壊的に実装する）。
+//
+// 【既知の限界】この位置固定の前提は「地図（法14条1項）」系の現行フォーマット2
+// サンプルでのみ検証済み。旧公図（地図に準ずる図面）・他の登記所での追加検証は
+// 行っていない。過去の撤回時に見つかった「方角記号が道路沿いに斜めに配置される」
+// パターンは、位置固定の前提そのものが崩れる（探索マージン内に実際の記号が存在
+// しない）場合に相当し、その際はHough的な再探索が失敗して固定オフセットの
+// フォールバックに落ちるだけで、既存の境界線データを壊すことはない設計になっている。
+// =====================================================================
+const DIRECTION_BASE_OFFSET_MM   = [20.8, 32.4]; // 矢印根本、図郭左上原点(ページ実寸mm)
+const DIRECTION_TIP_OFFSET_MM    = [19.8, 14.0]; // 矢印先端
+const DIRECTION_SEARCH_MARGIN_MM = 10.0;
+const DIRECTION_LEN_MIN_MM       = 6.0;
+const DIRECTION_LEN_MAX_MM       = 30.0;
+
+function detectDirectionSymbol(features, scaleDenom) {
+  try {
+    // 図郭(frame)左上角を実寸mm(Y上向き)座標系で求める
+    let frameLeft = Infinity, frameTopYup = -Infinity, found = false;
+    for (const f of features) {
+      if (f.properties.layerType !== 'frame' || f.geometry.type !== 'LineString') continue;
+      for (const [x, y] of f.geometry.coordinates) {
+        found = true;
+        if (x < frameLeft)   frameLeft   = x;
+        if (y > frameTopYup) frameTopYup = y; // Y上向きなので図郭上端が最大Y
+      }
+    }
+    if (!found) return null;
+
+    // ページ実寸mmオフセット→実世界mm(縮尺倍済み、features座標系)へ変換
+    const toReal = ([dxPageMm, dyPageMm]) =>
+      [frameLeft + dxPageMm * scaleDenom, frameTopYup - dyPageMm * scaleDenom];
+    const fallbackBase = toReal(DIRECTION_BASE_OFFSET_MM);
+    const fallbackTip  = toReal(DIRECTION_TIP_OFFSET_MM);
+
+    const marginReal = DIRECTION_SEARCH_MARGIN_MM * scaleDenom;
+    const x0 = Math.min(fallbackBase[0], fallbackTip[0]) - marginReal;
+    const x1 = Math.max(fallbackBase[0], fallbackTip[0]) + marginReal;
+    const y0 = Math.min(fallbackBase[1], fallbackTip[1]) - marginReal;
+    const y1 = Math.max(fallbackBase[1], fallbackTip[1]) + marginReal;
+    const lenMinReal = DIRECTION_LEN_MIN_MM * scaleDenom;
+    const lenMaxReal = DIRECTION_LEN_MAX_MM * scaleDenom;
+
+    let best = null;
+    for (const f of features) {
+      if (f.properties.layerType !== 'border' || f.geometry.type !== 'LineString') continue;
+      const pts = f.geometry.coordinates;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
+        const midx = (ax + bx) / 2, midy = (ay + by) / 2;
+        if (midx < x0 || midx > x1 || midy < y0 || midy > y1) continue;
+        const lenReal = Math.hypot(bx - ax, by - ay);
+        if (lenReal < lenMinReal || lenReal > lenMaxReal) continue;
+        const angle = (Math.atan2(by - ay, bx - ax) * 180 / Math.PI + 180) % 180;
+        if (angle < 65 || angle > 115) continue; // ほぼ垂直の線分のみ採用
+        if (!best || lenReal > best.lenReal) best = { ax, ay, bx, by, lenReal };
+      }
+    }
+
+    if (!best) {
+      return { basePt: fallbackBase, tipPt: fallbackTip, source: 'fallback(fixed-offset)' };
+    }
+    const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+    const pa = [best.ax, best.ay], pb = [best.bx, best.by];
+    const [tipPt, basePt] = dist(pa, fallbackTip) <= dist(pb, fallbackTip) ? [pa, pb] : [pb, pa];
+    return { basePt, tipPt, source: 'detected' };
+  } catch (e) {
+    console.warn('[方角] 検出に失敗（無効化して続行）:', e);
+    return null;
+  }
 }
 
 // =====================================================================
