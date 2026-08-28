@@ -359,7 +359,7 @@
       <div class="dl-group">
         <button class="btn-dl"  id="downloadBtn" disabled onclick="downloadGeoJSON()">GeoJSON</button>
         <button class="btn-cad" id="dxfBtn"      disabled onclick="downloadDXF()">DXF</button>
-        <button class="btn-cad" id="jwcBtn"      disabled onclick="downloadJWC()">JWC</button>
+        <button class="btn-cad" id="jwcBtn"      disabled onclick="downloadJWC()" title="実験的機能：Jw_cad純正フォーマットとの互換性を確認できていません。開けない場合はDXF出力をご利用ください">JWC</button>
         <button class="btn-cad" id="pngBtn"      disabled onclick="downloadPNG()" title="距離測定を含めた現在の表示をPNG画像で保存（現地確認・商談時の印刷用）">🖨 PNG保存</button>
       </div>
     </div>
@@ -2055,7 +2055,21 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
 }
 
 // =====================================================================
-// JWC ダウンロード（Jw_cad テキスト形式）
+// JWC ダウンロード（Jw_cad向けテキスト形式・実験的機能）
+//
+// 【重要な注意】2026-08-29 調査結果:
+// 実在するJw_cadのネイティブ図面ファイル形式（.jww=Windows版/.jwc=DOS版旧資産用）は
+// いずれもバイナリ形式であり、公開された仕様書が見当たらない。また、Jw_cadが扱う
+// テキスト形式のデータ交換は「外部変形」機能が使うJWC_TEMP.TXT（識別子 hq/hs/lg/ly/lc/lt/
+// ci/ch 等、外部変形バッチから実行中のJw_cadへ読み戻す専用の一時ファイル）のみで、
+// これはメニューの「開く」からファイルとして開けるものではない。
+// 本関数が出力するテキスト（# Jw_cad Data / HST / P.. / S / hs / ST / L / HED / WL / l / TJ
+// という独自の行識別子）は、上記いずれの実在フォーマットとも一致しない。つまり拡張子を
+// .jwc に直しても、Jw_cad側で正しく解釈される保証はない（実機未検証）。
+// ファイル名の拡張子が誤って .txt になっていた点は明確なバグとして修正したが、
+// データ形式自体がJw_cad純正仕様と一致するかどうかは断定できない。
+// 実際に確実に読み込めるのはDXF出力（AC1009/R12準拠、標準フォーマット）なので、
+// JWCが開けない場合はDXF出力の利用を案内すること。
 // =====================================================================
 function downloadJWC() {
   if (!geojsonResult) return;
@@ -2070,7 +2084,9 @@ function downloadJWC() {
   const blob = toShiftJisBlob(jwc, 'text/plain; charset=Shift_JIS');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = nowStamp() + '.txt';
+  // 拡張子バグ修正: 従来は '.txt' のままダウンロードされており、Jw_cad側の
+  // ファイル選択ダイアログ（拡張子フィルタ）に表示されず開けない事故の一因だった。
+  a.download = nowStamp() + '.jwc';
   a.click();
 }
 
