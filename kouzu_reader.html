@@ -265,7 +265,7 @@
 
     <hr class="sep">
 
-    <div class="accordion" id="cadToggle" onclick="toggleCad()">▶ JWCAD出力設定</div>
+    <div class="accordion" id="cadToggle" onclick="toggleCad()">▶ CAD出力設定</div>
     <div class="accordion-body" id="cadBody">
       <div class="sg" style="margin-bottom:6px">
         <label>公図の縮尺</label>
@@ -279,7 +279,7 @@
           <option value="1000">1:1000</option>
           <option value="2500">1:2500</option>
         </select>
-        <div class="hint">公図に記載の縮尺を選択してください。DXF・JWCの座標が実寸mm（実世界）に変換されます。</div>
+        <div class="hint">公図に記載の縮尺を選択してください。DXFの座標が実寸mm（実世界）に変換されます。</div>
         <div id="scaleCheckPanel" style="display:none;margin-top:8px;padding:7px;background:#10172d;border:1px solid #e0a800;border-radius:5px">
           <div style="font-size:11px;color:#ffd966;font-weight:bold;margin-bottom:5px">① 下の画像で「出力縮尺」を確認</div>
           <div id="scaleDetectResult" style="font-size:11px;color:#aaa;margin-bottom:5px">縮尺を自動検出します…</div>
@@ -295,7 +295,7 @@
       <div class="sg" style="margin-bottom:6px">
         <label>地番文字の出力サイズ（紙面mm・全ラベル統一）</label>
         <input type="number" id="labelTextHeightMm" value="2.0" min="0.5" max="10" step="0.1" style="width:70px" oninput="redrawPreview()">
-        <div class="hint">元図面から読み取った文字はサイズがバラつくため、DXF/JWC出力とプレビューの地番文字を全てこの高さに統一します。</div>
+        <div class="hint">元図面から読み取った文字はサイズがバラつくため、DXF出力とプレビューの地番文字を全てこの高さに統一します。</div>
       </div>
       <div style="font-size:10px;color:#666;background:#0f3460;border-radius:4px;padding:6px;margin-bottom:4px">
         💡 変換式: 実寸 = pixel × (25.4/DPI) × 縮尺分母<br>
@@ -359,7 +359,6 @@
       <div class="dl-group">
         <button class="btn-dl"  id="downloadBtn" disabled onclick="downloadGeoJSON()">GeoJSON</button>
         <button class="btn-cad" id="dxfBtn"      disabled onclick="downloadDXF()">DXF</button>
-        <button class="btn-cad" id="jwcBtn"      disabled onclick="downloadJWC()">JWC</button>
         <button class="btn-cad" id="pngBtn"      disabled onclick="downloadPNG()" title="距離測定を含めた現在の表示をPNG画像で保存（現地確認・商談時の印刷用）">🖨 PNG保存</button>
       </div>
     </div>
@@ -410,7 +409,7 @@ function setBgOpacity(v) { bgOpacity = Math.max(0.1, Math.min(1, v / 100)); redr
 
 // 地番文字の出力サイズ（紙面mm）。元図面から読み取った文字はOCR誤差等で
 // サイズがバラつくため、個々の feat.properties.fontSize は使わず、この
-// 統一値をDXF/JWC出力・プレビュー双方で使う。
+// 統一値をDXF出力・プレビュー双方で使う。
 function getLabelTextHeightMm() {
   const el = document.getElementById('labelTextHeightMm');
   const v  = el ? parseFloat(el.value) : NaN;
@@ -860,7 +859,7 @@ function toggleCad() {
   const b = document.getElementById('cadBody');
   const t = document.getElementById('cadToggle');
   b.classList.toggle('open');
-  t.textContent = (b.classList.contains('open') ? '▼' : '▶') + ' JWCAD出力設定';
+  t.textContent = (b.classList.contains('open') ? '▼' : '▶') + ' CAD出力設定';
 }
 function toggleGcp() {
   const b = document.getElementById('gcpBody');
@@ -970,7 +969,7 @@ async function loadFile(file) {
     for (let i = 1; i <= pdfDoc.numPages; i++) sel.innerHTML += `<option value="${i}">${i}</option>`;
 
     document.getElementById('cadBody').classList.add('open');
-    document.getElementById('cadToggle').textContent = '▼ JWCAD出力設定';
+    document.getElementById('cadToggle').textContent = '▼ CAD出力設定';
     document.getElementById('scaleCheckPanel').style.display = 'block';
     resetScaleConfirmation();
     setStatus('下部の出力縮尺を確認し、縮尺を選択してください', 'run');
@@ -1049,7 +1048,7 @@ async function detectScaleFromCanvas(canvas) {
       document.getElementById('mmPerPxCalc').textContent = (25.4 / dpi * parseInt(detected)).toFixed(1);
       document.getElementById('scaleConfirmed').checked = true;
       document.getElementById('processBtn').disabled = false;
-      result.textContent = `✓ 自動検出: 1:${detected}（この縮尺でDXF・JWCを出力します）`;
+      result.textContent = `✓ 自動検出: 1:${detected}（この縮尺でDXFを出力します）`;
       result.style.color = '#7ee787';
       setStatus(`縮尺 1:${detected} を自動検出しました → 変換できます`, 'ok');
     } else if (found.size > 1) {
@@ -1458,7 +1457,7 @@ async function processDocument() {
           // ここでの一次しきい値は「二段階検証に進めるかどうか」の足切りに
           // 留め、低めに設定する（旧: conf85/charConf80 は足切りが強すぎて
           // 正しい地番の多くが二段階検証にすら進めず未採用になっていた）。
-          // それでも誤読が完全にゼロになる保証はないため、DXF/JWC出力後は
+          // それでも誤読が完全にゼロになる保証はないため、DXF出力後は
           // 必ず元のスキャン画像と目視で照合すること。
           const LABEL_MIN_CONF = 40;
           // 単語平均confidenceだけでなく、最も自信のなかった1文字の
@@ -1596,7 +1595,7 @@ async function processDocument() {
               }
               textFeatures.push({
                 type: 'Feature',
-                // 挿入点は左下基準（DXF/JWCのTEXTは水平・垂直位置指定なしのため
+                // 挿入点は左下基準（DXFのTEXTは水平・垂直位置指定なしのため
                 // 既定で左下基準になる。実テキストと同じ扱いに揃える）。
                 // マージン込みbboxではなく生bboxを使い、位置・文字高のずれを防ぐ。
                 geometry: { type: 'Point', coordinates: [b.rawMinX, b.rawMinY] },
@@ -1669,7 +1668,6 @@ async function processDocument() {
     document.getElementById('geojsonText').value    = JSON.stringify(result, null, 2);
     document.getElementById('downloadBtn').disabled = false;
     document.getElementById('dxfBtn').disabled      = false;
-    document.getElementById('jwcBtn').disabled      = false;
     document.getElementById('pngBtn').disabled      = false;
 
     const n = allFeatures.length;
@@ -1737,7 +1735,7 @@ function classifyVectorFeatures(features, scaleDenom) {
     } else if (b.diag <= TEXT_DIAG_MAX_MM) {
       feat.properties.layerType = 'text';
     }
-    // それ以外(大きい図形)は未指定のまま → detectLayer_DXF/JWCの
+    // それ以外(大きい図形)は未指定のまま → detectLayer_DXFの
     // フォールバック判定（外枠/境界線）に委ねる
   });
 }
@@ -1747,7 +1745,7 @@ function drawContours(ctx, features, imgW, imgH, scaleDenom, dpi) {
   function mmToPx([mx, my]) {
     return [mx * mmToPixFactor, imgH - my * mmToPixFactor];
   }
-  // レイヤ種別ごとのプレビュー色。DXF/JWC出力の色分け（境界線=黄, 文字=緑,
+  // レイヤ種別ごとのプレビュー色。DXF出力の色分け（境界線=黄, 文字=緑,
   // 方角=青）と対応関係が分かるよう、境界線/外枠は既存のアクセント色のまま、
   // 文字・方角は別色にする。
   // 境界線/外枠は背景ラスターに焼き込まれた地番文字（橙・赤・緑系が多い）と
@@ -1815,7 +1813,7 @@ function toShiftJisBlob(str, mime) {
 // GeoJSON ダウンロード
 // =====================================================================
 // プレビューのレイヤ表示切替(境界線/外枠/地番)を反映したFeatureCollectionを返す
-// 全エクスポート形式(GeoJSON/DXF/JWC)で共通利用
+// 全エクスポート形式(GeoJSON/DXF)で共通利用
 function getVisibleGeojson() {
   const visible = geojsonResult.features.filter(f => {
     const lt = f.properties.layerType;
@@ -1869,30 +1867,12 @@ function detectLayer_DXF(feat, mmVerts, totalArea) {
   return isFrame ? 'kouzu_frame' : (isText ? 'kouzu_text' : 'kouzu_border');
 }
 
-function detectLayer_JWC(feat, mmVerts, totalArea) {
-  const lt = feat.properties.layerType;
-  if (lt === 'frame')     return 2;
-  if (lt === 'text')      return 1;
-  if (lt === 'direction') return 3;
-  if (lt === 'border')    return 0;
-  // ベクターモード or 旧フォーマットへのフォールバック
-  let fMinX = Infinity, fMaxX = -Infinity, fMinY = Infinity, fMaxY = -Infinity;
-  for (const [mx, my] of mmVerts) {
-    if (mx < fMinX) fMinX = mx; if (mx > fMaxX) fMaxX = mx;
-    if (my < fMinY) fMinY = my; if (my > fMaxY) fMaxY = my;
-  }
-  const fArea = (fMaxX - fMinX) * (fMaxY - fMinY);
-  const isFrame = totalArea > 0 && fArea / totalArea > 0.85 && mmVerts.length <= 6;
-  const isText  = feat.properties.isBoundary === false;
-  return isFrame ? 2 : (isText ? 1 : 0);
-}
-
 // =====================================================================
 // DXF ダウンロード（JWCAD インポート用 DXF R12/AC1009）
 // =====================================================================
 function downloadDXF() {
   if (!geojsonResult) return;
-  // GCP(地理参照)適用後は座標が緯度経度(度)になっており、DXF/JWCは
+  // GCP(地理参照)適用後は座標が緯度経度(度)になっており、DXFは
   // 実寸mmでしか出力できない。度をmmとして書き出すと図面が壊れるため止める。
   if (geojsonResult._meta && geojsonResult._meta.coordinate_system === 'WGS84 (EPSG:4326)') {
     alert('GCP（地理座標）適用後はDXF出力できません。GCPを設定する前の結果を使用するか、GeoJSON出力をご利用ください。');
@@ -2052,149 +2032,6 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
   w('  0','EOF');
 
   return L.join('\r\n');
-}
-
-// =====================================================================
-// JWC ダウンロード（Jw_cad向けテキスト形式・実験的機能）
-//
-// 【重要な注意】2026-08-29 調査結果:
-// 実在するJw_cadのネイティブ図面ファイル形式（.jww=Windows版/.jwc=DOS版旧資産用）は
-// いずれもバイナリ形式であり、公開された仕様書が見当たらない。また、Jw_cadが扱う
-// テキスト形式のデータ交換は「外部変形」機能が使うJWC_TEMP.TXT（識別子 hq/hs/lg/ly/lc/lt/
-// ci/ch 等、外部変形バッチから実行中のJw_cadへ読み戻す専用の一時ファイル）のみで、
-// これはメニューの「開く」からファイルとして開けるものではない。
-// 本関数が出力するテキスト（# Jw_cad Data / HST / P.. / S / hs / ST / L / HED / WL / l / TJ
-// という独自の行識別子）は、上記いずれの実在フォーマットとも一致しない。つまり拡張子を
-// .jwc に直しても、Jw_cad側で正しく解釈される保証はない（実機未検証）。
-// ファイル名の拡張子が誤って .txt になっていた点は明確なバグとして修正したが、
-// データ形式自体がJw_cad純正仕様と一致するかどうかは断定できない。
-// 実際に確実に読み込めるのはDXF出力（AC1009/R12準拠、標準フォーマット）なので、
-// JWCが開けない場合はDXF出力の利用を案内すること。
-// =====================================================================
-function downloadJWC() {
-  if (!geojsonResult) return;
-  // GCP(地理参照)適用後は座標が緯度経度(度)になっており、DXF出力と同じ理由で止める。
-  if (geojsonResult._meta && geojsonResult._meta.coordinate_system === 'WGS84 (EPSG:4326)') {
-    alert('GCP（地理座標）適用後はJWC出力できません。GCPを設定する前の結果を使用するか、GeoJSON出力をご利用ください。');
-    return;
-  }
-  // 変換実行(processDocument)時に実際に使った縮尺を使う（DXF出力と同じ理由）
-  const scaleDenom = geojsonResult._meta.scale_denom;
-  const jwc  = geojsonToJWC(getVisibleGeojson(), scaleDenom, lastDpi);
-  const blob = toShiftJisBlob(jwc, 'text/plain; charset=Shift_JIS');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  // 拡張子バグ修正: 従来は '.txt' のままダウンロードされており、Jw_cad側の
-  // ファイル選択ダイアログ（拡張子フィルタ）に表示されず開けない事故の一因だった。
-  a.download = nowStamp() + '.jwc';
-  a.click();
-}
-
-function geojsonToJWC(geojson, scaleDenom, dpi) {
-  const isPixel = !geojson._meta || geojson._meta.coordinate_system.startsWith('pixel');
-  const [imgW, imgH] = geojson._meta ? geojson._meta.img_size : [0, 0];
-  // DXF出力と同じ方針: 実世界mmをそのまま出力し、JW_CAD側はS=1/1(実寸)で読む。
-  // 縮尺の掛け算をJW_CAD側の設定に依存させない。
-  function toMm([x, y]) {
-    if (isPixel) return [+(x * 25.4 / dpi * scaleDenom).toFixed(3), +((imgH - y) * 25.4 / dpi * scaleDenom).toFixed(3)];
-    return [+x.toFixed(3), +y.toFixed(3)];
-  }
-
-  // LineString / Polygon 両対応
-  function getRings(feat) {
-    return feat.geometry.type === 'LineString'
-      ? [feat.geometry.coordinates]
-      : feat.geometry.coordinates;
-  }
-
-  // 全頂点から extents を計算（Point=地番テキストは除外。フラット[x,y]なのでring扱いすると壊れる）
-  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
-  for (const feat of geojson.features) {
-    if (feat.geometry.type === 'Point') continue;
-    for (const ring of getRings(feat)) {
-      for (const pt of ring) {
-        const [mx, my] = toMm(pt);
-        if (mx < minX) minX = mx; if (mx > maxX) maxX = mx;
-        if (my < minY) minY = my; if (my > maxY) maxY = my;
-      }
-    }
-  }
-  if (!isFinite(minX)) { minX = minY = 0; maxX = maxY = 1000; }
-  const totalArea = (maxX - minX) * (maxY - minY);
-
-  function paperCode(wx, wy) {
-    if (wx <= 297 && wy <= 210) return '12 0';
-    if (wx <= 420 && wy <= 297) return '16 0';
-    if (wx <= 594 && wy <= 420) return '21 0';
-    return '22 0';
-  }
-  // 用紙サイズ（mm）。paperCode()の判定しきい値と対で管理し、印刷枠の
-  // 中央に図面が来るよう平行移動オフセットを求める。
-  function paperSizeMm(wx, wy) {
-    if (wx <= 297 && wy <= 210) return [297, 210];
-    if (wx <= 420 && wy <= 297) return [420, 297];
-    if (wx <= 594 && wy <= 420) return [594, 420];
-    return [841, 594];
-  }
-  const drawW = maxX - minX, drawH = maxY - minY;
-  // 図形座標は実寸mmなので、用紙判定は検出縮尺で紙面mmへ戻して行う。
-  const paperDrawW = drawW / scaleDenom, paperDrawH = drawH / scaleDenom;
-  const [paperWmm, paperHmm] = paperSizeMm(paperDrawW, paperDrawH);
-  // JWC座標系の用紙寸法も実寸mm（紙面mm×縮尺）として中央配置する。
-  const paperW = paperWmm * scaleDenom, paperH = paperHmm * scaleDenom;
-  const offX = paperW / 2 - (minX + drawW / 2);
-  const offY = paperH / 2 - (minY + drawH / 2);
-  function toPaper([mx, my]) { return [+(mx + offX).toFixed(3), +(my + offY).toFixed(3)]; }
-
-  const L = [];
-  L.push('# Jw_cad Data');
-  L.push('HST');
-  L.push('P' + paperCode(paperDrawW, paperDrawH));
-  // 座標は実寸mmのまま、Jw_cadの図面縮尺と全レイヤグループ縮尺に
-  // OCR検出値を設定する。測定距離と表示縮尺の両方を一致させる。
-  L.push('S ' + scaleDenom);
-  const groupScales = Array(16).fill(scaleDenom);
-  L.push('hs ' + groupScales.join(' '));
-  L.push('ST 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0');
-  L.push('L 0 2 0');  // レイヤ0 黄（境界線）
-  L.push('L 1 3 0');  // レイヤ1 緑（地番・文字）
-  L.push('L 2 7 0');  // レイヤ2 白（外枠）
-  L.push('L 3 5 0');  // レイヤ3 青（方角記号）
-  L.push('HED');
-
-  // 図形データ（線分に展開）
-  for (const feat of geojson.features) {
-    if (feat.geometry.type === 'Point') continue;
-    for (const ring of getRings(feat)) {
-      const verts = feat.geometry.type === 'Polygon' ? ring.slice(0, -1) : ring;
-      if (verts.length < 2) continue;
-
-      const mmVerts = verts.map(pt => toMm(pt));
-      const jwcLayer = detectLayer_JWC(feat, mmVerts, totalArea);
-
-      L.push('WL ' + jwcLayer);
-      const n = mmVerts.length;
-      for (let i = 0; i < n - 1; i++) {
-        const [x1, y1] = toPaper(mmVerts[i]);
-        const [x2, y2] = toPaper(mmVerts[i + 1]);
-        L.push(`l ${x1} ${y1} ${x2} ${y2}`);
-      }
-    }
-  }
-
-  // テキストエンティティ（地番ラベル）
-  L.push('WL 1');
-  for (const feat of geojson.features) {
-    if (feat.geometry.type !== 'Point' || !feat.properties.text) continue;
-    const [mx, my] = toPaper(toMm(feat.geometry.coordinates));
-    // DXF出力と同じく、統一した地番文字の出力サイズ（紙面mm→実寸mm）を使う
-    const h = Math.max(0.5, getLabelTextHeightMm() * scaleDenom);
-    // TJ: X Y 角度 文字高 文字幅 字間 種別 斜体 ゴシック 基点
-    L.push(`TJ ${mx.toFixed(3)} ${my.toFixed(3)} 0 ${h.toFixed(3)} 0 0 0 0 0 0`);
-    L.push(feat.properties.text);
-  }
-
-  return L.join('\n');
 }
 
 // =====================================================================
