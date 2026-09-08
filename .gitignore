@@ -1,0 +1,16 @@
+# 実データ（不動産登記・公図PDF）はコミットしない。公開リポジトリのため所在・地番が漏れる
+*.pdf
+*.PDF
+samples/
+test_target.pdf
+
+# ローカル検証用（コミット不要）
+node_modules/
+package.json
+package-lock.json
+/.playwright/
+playwright-report/
+test-results/
+*.local.*
+_verify_*.mjs
+_verify_out/
