@@ -197,71 +197,73 @@
       <select id="pageSelect"><option value="1">1</option></select>
     </div>
 
-    <!-- 解像度(DPI)・最小面積・輪郭の精細さは実PDFで何度もテストした結果、
-         これ以上ユーザーが毎回調整する意味がないと判断し固定値にした。
-         値そのものは維持し、UI上の表示のみ省略する（挙動を変えないため）。 -->
-    <div class="sg" style="display:none">
-      <label>解像度 (DPI) <span class="val" id="dpiVal">400</span></label>
-      <input type="range" id="dpi" min="72" max="400" value="400" step="10"
-             oninput="document.getElementById('dpiVal').textContent=this.value">
-      <div class="hint">数値公図は300〜400推奨。高いほど処理が遅くなります</div>
-    </div>
-
-    <div class="sg" style="display:none">
-      <label>最小面積（px²） <span class="val" id="minAreaVal">500</span></label>
-      <input type="range" id="minArea" min="50" max="10000" value="500" step="50"
-             oninput="document.getElementById('minAreaVal').textContent=this.value">
-      <div class="hint">これより小さい領域はノイズとして除去</div>
-    </div>
-
-    <div class="sg" style="display:none">
-      <label>輪郭の精細さ <span class="val" id="epsLabel">中</span></label>
-      <input type="range" id="epsilon" min="1" max="10" value="4" step="1"
-             oninput="updateEpsLabel(+this.value)">
-      <div class="hint">← 精細（点数多）　　粗め（点数少）→</div>
-    </div>
-
     <div class="row">
       <label>輪郭を色付き表示</label>
       <input type="checkbox" id="showContours" checked>
     </div>
 
-    <!-- テキスト抽出・公図レイアウト最適化・薄線強化は「常にONが正解」の
-         品質パラメータのためON固定・非表示化した。破線スキップ・斜線強化は
-         PDFの内容や意図によって結果が変わる設定なので表示を残している。 -->
-    <div class="row" style="display:none">
-      <label>テキスト（地番）を抽出・表示</label>
-      <input type="checkbox" id="extractText" checked>
-    </div>
+    <!-- 従来は固定値化して display:none で隠していた調整項目群。id・イベント
+         登録先・既定値はすべて従来のまま。折りたたみ(<details>)で既定は閉じた
+         状態にし、必要な時だけ開いて変更できるようにした（第1段改善: 隠れUIの
+         表出。値・挙動は一切変えていない）。 -->
+    <details class="sg" style="margin-top:6px">
+      <summary style="cursor:pointer">詳細設定（通常は変更不要）</summary>
 
-    <div class="row" style="margin-top:4px">
-      <label>破線をスキップ（点線除外）</label>
-      <input type="checkbox" id="skipDash">
-    </div>
+      <div class="sg">
+        <label>解像度 (DPI) <span class="val" id="dpiVal">400</span></label>
+        <input type="range" id="dpi" min="72" max="400" value="400" step="10"
+               oninput="document.getElementById('dpiVal').textContent=this.value">
+        <div class="hint">数値公図は300〜400推奨。高いほど処理が遅くなります</div>
+      </div>
 
-    <div class="row" style="display:none">
-      <label>公図レイアウト最適化</label>
-      <input type="checkbox" id="kouzuOpt" checked>
-    </div>
-    <div class="row" style="display:none">
-      <label>上部除外％（ヘッダー等）</label>
-      <input type="number" id="topExclPct" value="7" min="0" max="40" step="1" style="width:56px">
-    </div>
-    <div class="row" style="display:none">
-      <label>下部除外％（表・凡例等）</label>
-      <input type="number" id="botExclPct" value="27" min="0" max="60" step="1" style="width:56px">
-    </div>
+      <div class="sg">
+        <label>最小面積（px²） <span class="val" id="minAreaVal">500</span></label>
+        <input type="range" id="minArea" min="50" max="10000" value="500" step="50"
+               oninput="document.getElementById('minAreaVal').textContent=this.value">
+        <div class="hint">これより小さい領域はノイズとして除去</div>
+      </div>
 
-    <div class="row" style="margin-top:6px">
-      <label>斜線強化（ラスター優先）</label>
-      <input type="checkbox" id="forceRaster">
-    </div>
-    <div class="hint" style="margin:-2px 0 4px">斜めの区画線が読めない場合にON</div>
+      <div class="sg">
+        <label>輪郭の精細さ <span class="val" id="epsLabel">中</span></label>
+        <input type="range" id="epsilon" min="1" max="10" value="4" step="1"
+               oninput="updateEpsLabel(+this.value)">
+        <div class="hint">← 精細（点数多）　　粗め（点数少）→</div>
+      </div>
 
-    <div class="row" style="display:none">
-      <label>薄線強化（適応しきい値）</label>
-      <input type="checkbox" id="thinLine" checked>
-    </div>
+      <div class="row">
+        <label>テキスト（地番）を抽出・表示</label>
+        <input type="checkbox" id="extractText" checked>
+      </div>
+
+      <div class="row" style="margin-top:4px">
+        <label>破線をスキップ（点線除外）</label>
+        <input type="checkbox" id="skipDash">
+      </div>
+
+      <div class="row">
+        <label>公図レイアウト最適化</label>
+        <input type="checkbox" id="kouzuOpt" checked>
+      </div>
+      <div class="row">
+        <label>上部除外％（ヘッダー等）</label>
+        <input type="number" id="topExclPct" value="7" min="0" max="40" step="1" style="width:56px">
+      </div>
+      <div class="row">
+        <label>下部除外％（表・凡例等）</label>
+        <input type="number" id="botExclPct" value="27" min="0" max="60" step="1" style="width:56px">
+      </div>
+
+      <div class="row" style="margin-top:6px">
+        <label>斜線強化（ラスター優先）</label>
+        <input type="checkbox" id="forceRaster">
+      </div>
+      <div class="hint" style="margin:-2px 0 4px">斜めの区画線が読めない場合にON</div>
+
+      <div class="row">
+        <label>薄線強化（適応しきい値）</label>
+        <input type="checkbox" id="thinLine" checked>
+      </div>
+    </details>
 
     <hr class="sep">
 
@@ -1209,7 +1211,37 @@ async function processDocument() {
       console.log('[斜線強化] ベクター0件 → ラスター処理');
     }
 
-    const needRasterTrace = (features.length === 0 || forceRaster);
+    // ── ラスター/ベクター分岐の堅牢化（第1段改善・問題1）────────────────
+    // スキャンされた画像PDF（地図に準ずる図面）にスキャン枠等のベクター矩形が
+    // 1〜数本混ざると features.length!==0 になり、従来は境界線がほとんど取れて
+    // いなくてもラスタートレースへ入らず完了していた。画像描画オペレータの
+    // 有無・有効境界線本数・総線長のいずれかが不足していればラスターへ回す。
+    const validBorderCount = features.filter(f =>
+        f.geometry && f.geometry.type === 'LineString' &&
+        f.geometry.coordinates.length >= 2).length;
+    // 総線長（mm）。features は既に実寸mm座標（mm_realworld）で入っている。
+    let totalLenMm = 0;
+    for (const f of features) {
+      const c = f.geometry && f.geometry.coordinates;
+      if (!c || f.geometry.type !== 'LineString') continue;
+      for (let i = 1; i < c.length; i++)
+        totalLenMm += Math.hypot(c[i][0] - c[i - 1][0], c[i][1] - c[i - 1][1]);
+    }
+    const pageDiagMm = Math.hypot(canvas.width, canvas.height) * (25.4 / dpi * scaleDenom);
+    // textFeatures は上（テキスト抽出ブロック）で既に抽出済みのため、判定順序を
+    // 動かす必要はない（kouzuOpt のヘッダー／表フィルタの副作用にも触れない）。
+    // 「画像描画オペレータあり」かつ「ベクター実テキスト0件」を画像PDFとみなす。
+    // extractText が OFF の時は textFeatures が常に空になるので、その場合のみ
+    // features 件数の簡易ヒューリスティクスにフォールバックする。
+    const isImagePdf = (res.imageOps || 0) > 0 &&
+        (document.getElementById('extractText').checked ? textFeatures.length === 0 : features.length < 30);
+    const needRasterTrace =
+        forceRaster ||
+        features.length === 0 ||
+        isImagePdf ||
+        validBorderCount < 8 ||
+        totalLenMm < pageDiagMm * 0.5;
+    console.log(`[分岐判定] validBorders=${validBorderCount} totalLenMm=${totalLenMm.toFixed(1)} pageDiagMm=${pageDiagMm.toFixed(1)} imageOps=${res.imageOps || 0} isImagePdf=${isImagePdf} → needRasterTrace=${needRasterTrace}`);
     // ベクターPDFで実テキストが1件も無い場合（地番がアウトライン化された
     // 図形のみで、実テキストとして埋め込まれていないケース）も、OCRによる
     // 文字読み取りを試みる。従来はラスター処理(needRasterTrace)の内側でしか
@@ -1248,6 +1280,10 @@ async function processDocument() {
       console.log('[ラスター] 検出ライン数:', lines.length, '画像サイズ:', procCanvas.width, 'x', procCanvas.height, '公図最適化:', kouzuOpt);
       setProgress(80); await tick();
 
+      // 第1段では既存挙動どおりラスター結果で features を丸ごと上書きする。
+      // ただし上書きで消えるベクター由来 features の件数を記録しておく。
+      console.log('[ラスター] features上書き前の件数:', features.length,
+                  '→ ラスター検出ライン数:', lines.length);
       // ピクセル座標を実寸mm（Y上向き）に変換してから格納
       features = lines.map(({ pts, pixLen, straightness, layerType }, i) => ({
         type: 'Feature',
@@ -1490,6 +1526,9 @@ async function processDocument() {
             const { ratio, lenByBox, total } = matchedBoxes(f);
             if (ratio < INSIDE_RATIO_THRESHOLD) continue;
             f.properties.layerType = 'text';
+            // 第1段改善(問題3): OCR起因の再分類を後段でトレースできるよう印を残す
+            // （色は変わるが線は削除しない。上書き自体は第1段では従来どおり）。
+            f.properties.wasReclassifiedByOcr = true;
             reclassified++;
             const { domBox, domRatio } = dominantBox(lenByBox, total);
             if (domBox && domRatio >= DOM_RATIO_THRESHOLD &&
@@ -1561,16 +1600,23 @@ async function processDocument() {
             // 分割するためだけ）に、.filter()の代わりに手動ループへ書き換えて
             // 定期的にawait tick()する。
             {
+              // 第1段改善(問題3・最小版): OCR採用領域が支配的なチェーンでも
+              // features からは削除しない。誤ってラベル扱いされた場合でも図形を
+              // 失わないよう、印(labelOverlap)だけ立てて DXF 側で別レイヤ
+              // (kouzu_border_maybe_label)へ分離する。keptFeatures への再代入は
+              // 残すが全件 push する（従来のフィルタは実質無効化）。
               const keptFeatures = [];
               let __filterTickCounter = 0;
               for (const f of features) {
-                let keep = true;
                 if (f.properties.layerType === 'text') {
                   const { lenByBox, total } = matchedBoxes(f);
                   const { domBox, domRatio } = dominantBox(lenByBox, total);
-                  keep = !(domBox && adoptedBoxes.has(domBox) && domRatio >= DOM_RATIO_THRESHOLD);
+                  if (domBox && adoptedBoxes.has(domBox) && domRatio >= DOM_RATIO_THRESHOLD) {
+                    f.properties.labelOverlap = true;
+                    f.properties.overlapText = domBox.text;
+                  }
                 }
-                if (keep) keptFeatures.push(f);
+                keptFeatures.push(f);
                 if ((++__filterTickCounter % 400) === 0) await tick();
               }
               features = keptFeatures;
@@ -1850,6 +1896,9 @@ function getRings(feat) {
 }
 
 function detectLayer_DXF(feat, mmVerts, totalArea) {
+  // 第1段改善(問題3): OCR採用ラベルと重なると判定された境界線は削除せず、
+  // 専用レイヤへ分離する（誤判定でも図形を失わないため。他の判定より優先）。
+  if (feat.properties.labelOverlap === true) return 'kouzu_border_maybe_label';
   const lt = feat.properties.layerType;
   if (lt === 'frame')     return 'kouzu_frame';
   if (lt === 'text')      return 'kouzu_text';
@@ -1965,8 +2014,9 @@ function geojsonToDXF(geojson, scaleDenom, dpi) {
   w('  0','TABLE','  2','LTYPE',' 70','1');
   w('  0','LTYPE','  2','CONTINUOUS',' 70','0','  3','Solid line',' 72','65',' 73','0',' 40','0.0');
   w('  0','ENDTAB');
-  w('  0','TABLE','  2','LAYER',' 70','5');
+  w('  0','TABLE','  2','LAYER',' 70','6');
   w('  0','LAYER','  2','kouzu_border',   ' 70','0',' 62','2','  6','CONTINUOUS');
+  w('  0','LAYER','  2','kouzu_border_maybe_label',' 70','0',' 62','8','  6','CONTINUOUS');
   w('  0','LAYER','  2','kouzu_text',     ' 70','0',' 62','3','  6','CONTINUOUS');
   w('  0','LAYER','  2','kouzu_frame',    ' 70','0',' 62','7','  6','CONTINUOUS');
   w('  0','LAYER','  2','kouzu_label',    ' 70','0',' 62',String(LABEL_ACI_COLOR),'  6','CONTINUOUS');
@@ -2070,7 +2120,12 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
     fill:22, eoFill:23, fillStroke:24, eoFillStroke:25,
     closeFillStroke:26, closeEOFillStroke:27, endPath:28,
     setLineWidth:2, setDash:6,
-    setStrokeGray:56, setStrokeCMYKColor:60, setStrokeRGBColor:58
+    setStrokeGray:56, setStrokeCMYKColor:60, setStrokeRGBColor:58,
+    // 画像PDF（スキャンされた「地図に準ずる図面」）判定用の画像描画オペレータ。
+    paintJpegXObject:82, paintImageMaskXObject:83, paintImageMaskXObjectGroup:84,
+    paintImageXObject:85, paintInlineImageXObject:86,
+    paintInlineImageXObjectGroup:87, paintImageXObjectRepeat:88,
+    paintImageMaskXObjectRepeat:89, paintSolidColorImageMask:90
   };
   console.log('[PDF診断] OPS moveTo:', OPS.moveTo, 'stroke:', OPS.stroke,
     'rectangle:', OPS.rectangle, 'moveTo count:', opFreq[OPS.moveTo]||0,
@@ -2196,9 +2251,21 @@ async function extractPdfPaths(pageNum, scaleDenom, dpi) {
   // 従来はstroke扱いで確定させてしまい偽の境界線を生む可能性があったため、破棄する。
   discardPath();
 
-  const debugInfo = `ops:${fns.length} moveTo:${opFreq[OPS.moveTo]||0} stroke:${opFreq[OPS.stroke]||0} fillStroke:${opFreq[OPS.fillStroke]||0} fill:${opFreq[OPS.fill]||0} rect:${opFreq[OPS.rectangle]||0} paths:${pathsBeforeFilter}`;
+  // 画像描画オペレータの総出現回数。スキャンされた画像PDFにスキャン枠等の
+  // ベクター矩形が混ざると features.length!==0 になりラスタートレースへ
+  // 入らない問題（第1段改善・問題1）の判定材料として processDocument へ返す。
+  const IMAGE_OPS = [
+    OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageMaskXObject,
+    OPS.paintImageMaskXObjectGroup, OPS.paintJpegXObject, OPS.paintImageXObjectRepeat,
+    OPS.paintImageMaskXObjectRepeat, OPS.paintInlineImageXObjectGroup,
+    OPS.paintSolidColorImageMask
+  ].filter(v => typeof v === 'number');
+  let imageOps = 0;
+  for (const v of IMAGE_OPS) imageOps += (opFreq[v] || 0);
+
+  const debugInfo = `ops:${fns.length} moveTo:${opFreq[OPS.moveTo]||0} stroke:${opFreq[OPS.stroke]||0} fillStroke:${opFreq[OPS.fillStroke]||0} fill:${opFreq[OPS.fill]||0} rect:${opFreq[OPS.rectangle]||0} img:${imageOps} paths:${pathsBeforeFilter}`;
   console.log('[PDF解析]', debugInfo, '→ features:', features.length);
-  return { features, debugInfo };
+  return { features, debugInfo, imageOps };
 }
 
 // =====================================================================
