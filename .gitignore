@@ -18,3 +18,4 @@ __pycache__/
 *.local.*
 _verify_*.mjs
 _verify_out/
+.venv/
