@@ -1,1 +1,1 @@
-# Pythonパッケージ不要（本番はNginxによる静的配信）
+-r requirements-v2.txt

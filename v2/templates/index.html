@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>公図PDF変換</title>
+  <link rel="stylesheet" href="{{ prefix }}/static/app.css">
+  <script defer src="{{ prefix }}/static/app.js"></script>
+</head>
+<body data-prefix="{{ prefix }}">
+  <header class="top"><div class="top-inner"><div class="logo">公図</div><div>
+    <h1>公図PDF変換</h1>
+    <p>PDFから線と地番を抽出し、GeoJSON・DXFへ変換</p>
+  </div></div></header>
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>原本を読み込む</h2>
+        <label class="file-zone"><input id="pdf" type="file" accept="application/pdf,.pdf"><strong id="file-label">公図PDFを選択</strong><small>PDFはVPSで一時処理し、保存しません</small></label>
+        <div class="form-grid">
+          <label>ページ<input id="page" type="number" min="1" value="1"></label>
+          <label>縮尺 1:<select id="scale"><option value="250">250</option><option value="500" selected>500</option><option value="1000">1000</option><option value="2000">2000</option></select></label>
+          <label>解像度<select id="dpi"><option value="180">180 dpi</option><option value="220" selected>220 dpi</option><option value="300">300 dpi</option></select></label>
+        </div>
+        <details><summary>図面外の除外範囲</summary><div class="form-grid">
+          <label>上部 %<input id="top-exclusion" type="number" min="0" max="40" value="7"></label>
+          <label>下部 %<input id="bottom-exclusion" type="number" min="0" max="60" value="27"></label>
+        </div></details>
+        <button id="convert" class="primary" type="button">変換する</button>
+        <p id="status" role="status" aria-live="polite">PDFを選択してください</p>
+      </section>
+      <section class="panel">
+        <h2>抽出結果</h2>
+        <dl id="stats" class="stats"><div><dt>線</dt><dd>—</dd></div><div><dt>地番候補</dt><dd>—</dd></div><div><dt>方式</dt><dd>—</dd></div></dl>
+        <div id="warning" class="warning" hidden></div>
+        <div class="download"><button id="geojson" disabled>GeoJSON</button><button id="dxf" disabled>DXF</button><button id="png" disabled>PNG</button></div>
+        <p class="hint">GeoJSONは図面座標のmmです。変換結果は筆界の候補なので、原本と照合し、必要な線は下の分類ボタンで修正してください。</p>
+      </section>
+      <section class="panel">
+        <h2>線の確認</h2>
+        <p class="hint">図面上の線をクリックして分類できます。青い線も境界候補へ変更できます。</p>
+        <p id="selection">線を選択してください</p>
+        <div class="role-buttons">
+          <button data-role="boundary_candidate" disabled>境界候補</button>
+          <button data-role="text_stroke" disabled>文字の線</button>
+          <button data-role="frame" disabled>図郭</button>
+          <button id="undo" disabled>元に戻す</button>
+        </div>
+        <button id="measure" class="measure" disabled>距離を測る</button>
+        <p id="distance" class="hint"></p>
+        <label class="check"><input id="show-labels" type="checkbox"> 抽出した地番を重ねる</label>
+        <label class="check"><input id="show-text-strokes" type="checkbox" checked> 文字の線も表示する</label>
+      </section>
+    </aside>
+    <section class="viewer panel"><div class="viewer-head"><h2>原本と抽出線の重ね合わせ</h2><span class="legend"><i class="boundary"></i>境界候補 <i class="text"></i>文字の線 <i class="frame"></i>図郭</span></div>
+      <div id="canvas-wrap" class="canvas-wrap"><p id="empty">変換後にここへ図面を表示します</p><img id="preview" alt="変換対象の公図PDF"><canvas id="overlay" aria-label="抽出された線"></canvas></div>
+    </section>
+  </main>
+</body>
+</html>

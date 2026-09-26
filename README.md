@@ -1,24 +1,33 @@
-# 公図PDF変換ツール（Xserver VPS版）
+# 公図PDF変換（VPS版）
 
-公図PDFを画像化し、区画を自動抽出してGeoJSON / DXF形式に変換するツールです。
-処理はすべてブラウザ内（JavaScript）で完結し、PDFやデータがサーバーに送信されることはありません。
+公図PDFから線と文字候補を抽出し、原本との重ね合わせで確認・修正して GeoJSON、DXF、PNG を出力するWebアプリです。新しい処理系は `v2_app.py` と `kouzu_engine.py` にあります。従来のブラウザ内処理版は `kouzu_reader.html` と `app.py` に残しています。
 
-## ローカルでの起動方法
+## 処理と精度
+
+- ベクターPDFは PyMuPDF で線を直接抽出します。画像PDFは OpenCV の二値化・細線化・直線検出を使います。
+- 文字は OCR で候補として表示します。文字に重なる線は削除せず `text_stroke` として分類し、画面上で境界候補へ戻せます。
+- 誤抽出・未抽出の可能性があります。原本との重ね合わせを確認し、境界・地番の法的判断には原本や測量成果を使用してください。
+- GeoJSON/DXF の座標は、指定縮尺から換算した現地相対座標（mm）です。地理座標系や絶対位置は付与しません。DXF も mm 単位です。
+- 距離測定は指定縮尺に基づく概算です。
+
+## ローカル実行
+
+Python 3.11 または 3.12 を推奨します。
 
 ```bash
-python app.py
+python -m venv .venv
+.venv/Scripts/pip install -r requirements-v2.txt
+.venv/Scripts/python v2_app.py
 ```
 
-`http://127.0.0.1:8501/kouzu/` を開きます。
+Windows 以外では `.venv/bin/python` を使います。`http://127.0.0.1:8511/kouzu/` にアクセスしてください。`/kouzu/healthz` で稼働確認できます。
 
-## Xserver VPSへのデプロイ
+## VPS 配置
 
-アプリ本体は単一HTMLで、PDF処理は引き続きブラウザ内だけで完結します。
-本番では `kouzu_reader.html` をNginxから `/kouzu/` として直接配信するため、
-StreamlitプロセスやPython依存パッケージは不要です。設定例は
-`deploy/nginx-location.conf` を参照してください。
+`deploy/kouzu-reader.service` は Gunicorn を 127.0.0.1:8511 で起動します。Nginx で `/kouzu/` をプロキシし、旧版は `/kouzu/legacy/` から提供できます。PDF はメモリ上で一時処理し、アプリ側では保存しません。アップロードの上限は 50 MB です。
 
-## ファイル構成
+```bash
+python -m pytest tests/test_v2_engine.py
+```
 
-- `app.py` — ローカル確認用の標準Python HTTPサーバー
-- `kouzu_reader.html` — 公図PDF変換ツール本体（単一HTML、pdf.jsを使用）
+実PDFを使うブラウザテストは `KOUZU_SAMPLE_PDF` を指定して `node tests/test_v2_browser.js` を実行します。

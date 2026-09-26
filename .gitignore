@@ -11,6 +11,10 @@ package-lock.json
 /.playwright/
 playwright-report/
 test-results/
+.venv-v2/
+.venv-v2-311/
+__pycache__/
+.pytest_cache/
 *.local.*
 _verify_*.mjs
 _verify_out/

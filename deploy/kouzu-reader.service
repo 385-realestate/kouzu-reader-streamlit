@@ -1,0 +1,18 @@
+[Unit]
+Description=Kouzu Reader Python Web
+After=network.target
+
+[Service]
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/apps/kouzu-reader
+Environment=KOUZU_URL_PREFIX=/kouzu
+ExecStart=/opt/apps/kouzu-reader/.venv/bin/gunicorn --workers 1 --threads 1 --timeout 120 --bind 127.0.0.1:8511 v2_app:app
+Restart=always
+RestartSec=5
+PrivateTmp=true
+NoNewPrivileges=true
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target
