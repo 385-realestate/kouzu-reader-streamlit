@@ -1,1 +1,1 @@
-streamlit
+# Pythonパッケージ不要（本番はNginxによる静的配信）

@@ -1,59 +1,14 @@
-import pathlib
+"""ローカル確認用サーバー。本番はNginxからHTMLを直接配信する。"""
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-import streamlit as st
-import streamlit.components.v1 as components
 
-st.set_page_config(page_title="公図PDF変換ツール", layout="wide")
+class Handler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in {"/", "/kouzu", "/kouzu/"}:
+            self.path = "/kouzu_reader.html"
+        return super().do_GET()
 
-st.markdown(
-    """
-    <style>
-    .block-container {
-        padding-top: 0rem;
-        padding-bottom: 0rem;
-        padding-left: 0rem;
-        padding-right: 0rem;
-        max-width: 100%;
-    }
-    iframe {
-        margin: 0;
-        display: block;
-        border: none;
-        border-radius: 0;
-        box-shadow: none;
-    }
-    div[data-testid="stIFrame"],
-    div[data-testid="element-container"],
-    div[data-testid="stCustomComponentV1"] {
-        border: none;
-        border-radius: 0;
-        box-shadow: none;
-        background: #1a1a2e;
-    }
-    header[data-testid="stHeader"] {
-        height: 0;
-        min-height: 0;
-    }
-    div[data-testid="stToolbar"] {
-        display: none;
-    }
-    div[data-testid="stDecoration"] {
-        display: none;
-    }
-    html, body,
-    .stApp,
-    [data-testid="stAppViewContainer"],
-    [data-testid="stMain"],
-    [data-testid="stMainBlockContainer"],
-    section.main {
-        background: #1a1a2e !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-html_path = pathlib.Path(__file__).parent / "kouzu_reader.html"
-html_content = html_path.read_text(encoding="utf-8")
-
-components.html(html_content, height=1400, scrolling=True)
+if __name__ == "__main__":
+    print("http://127.0.0.1:8501/kouzu/")
+    ThreadingHTTPServer(("127.0.0.1", 8501), Handler).serve_forever()
